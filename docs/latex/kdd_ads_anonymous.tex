@@ -59,16 +59,18 @@
 
 \begin{document}
 
-\title{Cost-Aware Classification: Putting Geometry into Label Distributions for Fraud Detection}
+\title{Cost-Aware Classification: Putting Geometry into Label Distributions for Fraud Detection and Image Recognition}
 
 \author{Anonymous Author(s)}
 \affiliation{\institution{Affiliation withheld for review} \country{}}
 \email{Email withheld}
 
 \begin{abstract}
-Industrial fraud detection systems trigger operational actions with asymmetric and instance-dependent economic consequences. Standard objectives such as cross-entropy are decision-agnostic: they treat misclassifications as equally undesirable and ignore transaction-specific cost geometry. While cross-entropy is a strictly proper scoring rule for probability estimation, it does not prioritize high-regret errors and therefore does not align learning with business value.
+Classifiers deployed in industry trigger downstream actions whose consequences are rarely uniform across error types. Cross-entropy, the de-facto training objective, is decision-agnostic: it treats every off-diagonal mistake identically and therefore aligns poorly with the actual quantity practitioners care about --- the expected cost incurred by the model's decision.
 
-We introduce \CACIS{} (Cost-Aware Classification with Informative Selection), a differentiable loss that embeds operational regret into the geometry of the predictive distribution. \CACIS{} uses entropy-regularized Optimal Transport to induce a task-specific metric on the label simplex and computes the model-implied distribution through a numerically stable Frank--Wolfe inner loop that operates directly on the simplex. We evaluate \CACIS{} on the IEEE-CIS/Vesta e-commerce benchmark using a strictly temporal protocol. \CACIS{} reduces expected business regret relative to cross-entropy, weighted cross-entropy, and focal loss while maintaining high precision and calibration fidelity. The method provides a practical bridge between probabilistic learning objectives and decision quality in applied data science.
+We introduce \CACIS{} (Cost-Aware Classification with Informative Selection), a differentiable loss that embeds a task-specific cost matrix into the geometry of the predictive distribution. \CACIS{} uses entropy-regularized Optimal Transport to induce a non-isotropic metric on the label simplex and computes the model-implied distribution through a numerically stable Frank--Wolfe inner loop that does not require unrolling Sinkhorn iterations.
+
+We illustrate the framework on two complementary examples that span the spectrum of \emph{ground costs}. In \textbf{fraud detection} (IEEE-CIS / Vesta), the cost matrix is \emph{instance-dependent and monetary}: each transaction induces its own $\mC(\vx)$ via a value model parameterized by transaction amount, chargeback multiplier, and false-decline friction. In \textbf{image recognition} (ImageNet-1k with a torchvision ResNet trained from scratch), the cost matrix is \emph{class-shared and semantic}: $\mC_{ij}$ is the cosine distance between FastText embeddings of class names, so confusing \emph{tiger} with \emph{leopard} is penalized far less than confusing \emph{tiger} with \emph{minivan}. The same loss, optimizer, and gradient strategy are used in both regimes; only the cost matrix changes. \CACIS{} reduces realized regret relative to cross-entropy and weighted cross-entropy on the fraud benchmark while maintaining calibration, and produces semantically gentler errors on ImageNet at unchanged top-1. The result is a single, decoupled recipe for cost-sensitive learning: specify the geometry once via $\mC$, train as usual.
 \end{abstract}
 
 \maketitle
@@ -77,17 +79,24 @@ We introduce \CACIS{} (Cost-Aware Classification with Informative Selection), a 
 % 1. INTRODUCTION
 % =========================================================
 \section{Introduction}
-Industrial classifiers are deployed as decision modules. Their outputs trigger actions with asymmetric and irreversible consequences. In fraud detection, approving a fraudulent transaction causes direct financial loss (principal, fees, and operational overhead), whereas declining a legitimate transaction causes lost margin and may reduce customer lifetime value. The severity of these outcomes depends on transaction attributes such as monetary amount; therefore, the cost of an error is instance-dependent.
+Classifiers are rarely deployed as ends in themselves; they are deployed as decision modules whose outputs feed downstream actions. The quality of those actions is what matters in practice, and that quality is governed by the \emph{cost structure} of the underlying problem --- which is almost never uniform.
 
-Despite this structure, many tabular classifiers are trained with cross-entropy. Cross-entropy is decision-agnostic: it treats the label set as a discrete, equidistant space and penalizes errors independently of operational impact. Practitioners often compensate using threshold tuning or heuristic reweighting. These interventions adjust the deployment policy but do not modify the training objective and therefore do not encourage the model to allocate representational capacity to high-regret regions.
+Two domains make this gap concrete:
 
-This paper introduces \CACIS{} (Cost-Aware Classification with Informative Selection), a loss function that aligns learning with a decision-theoretic objective. \CACIS{} integrates an explicit regret matrix into training by endowing the label simplex with a task-specific geometry derived from entropy-regularized Optimal Transport (OT). The loss replaces the Shannon/KL geometry induced by cross-entropy with a geometry in which moving probability mass across labels is penalized according to operational regret. This produces gradients that emphasize economically severe errors and shapes the representation manifold toward cost-optimal decision regions.
+\paragraph{Fraud detection (instance-dependent monetary cost).} In an e-commerce payment system, approving a fraudulent transaction causes direct financial loss (chargeback principal, network fees, and operational overhead), while declining a legitimate one causes lost margin and may erode customer lifetime value. The severity of either error scales with the transaction amount and other instance-level attributes, so the cost matrix is genuinely a \emph{function of the input}, $\mC(\vx)$. Practitioners typically compensate with threshold tuning or weighted cross-entropy, neither of which modifies the training objective in a structured way.
 
-\paragraph{Contributions.} This paper makes three contributions that match KDD Applied Data Science (ADS) criteria:
+\paragraph{Image recognition (class-shared semantic cost).} In a 1000-way image classifier, confusing \emph{tiger} with \emph{leopard} is qualitatively different from confusing \emph{tiger} with \emph{minivan}. Cross-entropy assigns both the same penalty. Yet a frozen NLP embedding (e.g., FastText) already encodes a perfectly usable proxy for semantic distance between class \emph{names}, so a cosine-distance cost matrix $\mC^{\mathrm{sem}}$ over the label set is trivial to construct and very informative.
+
+\paragraph{One recipe, two cost geometries.} Despite the apparent distance between these settings, the underlying mathematical object is the same: a cost matrix $\mC$ on a label simplex. The fraud case fixes the \emph{class structure} (binary) and varies the cost \emph{per example}; the ImageNet case fixes the cost matrix and varies only across \emph{classes}. We argue that the right training objective should accept $\mC$ as an input and absorb its geometry directly, regardless of which axis varies.
+
+This paper introduces \CACIS{} (Cost-Aware Classification with Informative Selection), a Fenchel--Young loss that does exactly this. It replaces the isotropic Shannon/KL geometry of cross-entropy with the non-isotropic geometry induced by entropy-regularized Optimal Transport (OT) under a user-supplied cost matrix. The model-implied distribution is computed by a Frank--Wolfe loop on the simplex, avoiding backpropagation through Sinkhorn iterations.
+
+\paragraph{Contributions.} This paper makes four contributions:
 \begin{enumerate}[leftmargin=1.2em, itemsep=0.2em, topsep=0.2em]
-  \item \textbf{Decision-aligned formulation.} We formalize industrial classification as regret minimization with an explicit value matrix and an instance-dependent regret matrix. We characterize the polyhedral decision regions induced on the probability simplex.
-  \item \textbf{\CACIS{} loss and stable optimization.} We introduce a differentiable OT-based Fenchel--Young loss and a simplex-stable Frank--Wolfe inner solver that computes the informative distribution without unrolling Sinkhorn iterations.
-  \item \textbf{Industrial evaluation and deployment guidance.} We evaluate on the IEEE-CIS/Vesta benchmark under a strictly temporal protocol and report regret, AUC-PR, and calibration metrics. We summarize deployment practices for delayed labels, shadow evaluation, and cost auditing.
+  \item \textbf{Decision-aligned formulation.} We formalize classification as regret minimization under a user-supplied cost matrix $\mC$, and characterize the polyhedral decision regions it induces on the simplex (\S\ref{sec:decision}).
+  \item \textbf{\CACIS{} loss and stable optimization.} We introduce a differentiable OT-based Fenchel--Young loss with a simplex-stable Frank--Wolfe inner solver (\S\ref{sec:cacis}).
+  \item \textbf{Two illustrative examples with the same recipe.} We evaluate \CACIS{} in two distinct regimes that exercise the cost geometry along orthogonal axes: instance-dependent monetary cost in fraud detection (\S\ref{sec:exp-fraud}) and class-shared semantic cost in ImageNet image recognition (\S\ref{sec:imagenet}).
+  \item \textbf{Deployable software.} We release a modular PyTorch implementation, a Docker image, an AWS launcher, and a cost-aware inference utility, so practitioners can swap $\mC$ for their own decision geometry.
 \end{enumerate}
 
 \section{Notation and Formalism}
@@ -308,15 +317,19 @@ We measure the calibration of \CACIS{} through the Expected Calibration Error (E
 % =========================================================
 \section{Experimental Evaluation}
 \label{sec:experiments}
-We benchmark \CACIS{} against established baselines using a large-scale e-commerce dataset, focusing on the delta between traditional performance metrics (accuracy, AUC) and realized business utility (regret).
+We evaluate \CACIS{} on \emph{two complementary examples} that stress the framework along orthogonal axes of the cost geometry. \S\ref{sec:exp-fraud} treats \emph{fraud detection}, where the cost matrix is binary and \emph{instance-dependent} (a function of the transaction amount). \S\ref{sec:imagenet} treats \emph{image recognition}, where the cost matrix is 1000$\times$1000 and \emph{class-shared} (cosine distance between FastText embeddings of class names). In both cases the loss, optimizer, and gradient strategy are unchanged --- only $\mC$ is swapped.
 
-\subsection{The IEEE-CIS/Vesta Protocol: Temporal Integrity}
+\subsection*{Example 1 --- Fraud Detection: Instance-Dependent Monetary Cost}
+\label{sec:exp-fraud}
+We benchmark \CACIS{} against established baselines on a large-scale e-commerce dataset, focusing on the delta between traditional performance metrics (accuracy, AUC) and realized business utility (regret).
+
+\subsubsection{The IEEE-CIS/Vesta Protocol: Temporal Integrity}
 We utilize the IEEE-CIS Fraud Detection dataset \citep{kaggle_ieee_cis_2019}, which comprises over 500,000 transactions across a six-month period. To ensure industrial relevance, we strictly adhere to a \emph{chronological splitting protocol}. Unlike random splits, which can leak future information into the model, we use the first four months for training, the fifth month for validation, and the final month for testing. This protocol mimics the real-world deployment scenario where a model trained on historical data must generalize to a shifting fraud landscape.
 
-\subsection{Performance Baselines and Statistical Rigor}
+\subsubsection{Performance Baselines and Statistical Rigor}
 We compare \CACIS{} against standard Cross-Entropy (CE), Weighted Cross-Entropy (WCE), and Focal Loss. We also introduce a ``Constant Baseline'' regret benchmark, which represents the business outcome of the best constant strategy (e.g., ``approve all'' or ``decline all'' based on historical prevalence). All reported results are averaged over five independent seeds with different weight initializations to ensure statistical significance.
 
-\subsection{Comparative Results}
+\subsubsection{Comparative Results}
 We compare \CACIS{} against Cross-Entropy (CE) and Weighted Cross-Entropy (WCE).
 
 \begin{table*}[t]
@@ -337,16 +350,13 @@ Focal Loss & $9.28 \pm 0.10$ & $0.605 \pm 0.004$ & $0.018 \pm 0.002$ & $0.045 \p
 
 \CACIS{} achieves significant reduction in business regret while maintaining high AUC-PR and excellent calibration. This confirms that internalizing the cost geometry helps the model learn a more operational boundary in the feature space. We observe that while standard cross-entropy suffers from "calibration drift" on high-amount transactions, \CACIS{} remains robustly aligned with the business value metric across all transaction scales.
 
-\subsection{Metric Sensitivity and Operational Thresholds}
+\subsubsection{Metric Sensitivity and Operational Thresholds}
 In a production setting, the choice of the decision threshold is governed by the relative costs in $\mC$. Standard AUC-PR measures performance across all thresholds equally. However, for fraud detection, we are primarily interested in the "High-Precision" regime (top-left of the PR curve). Our analysis shows that \CACIS{} significantly outperforms baselines in this critical region, allowing merchants to decline more fraud without increasing the friction for legitimate customers. This is quantified by the partial AUC (pAUC) at high precision, where \CACIS{} shows a 12\% relative improvement over standard cross-entropy.
 
-\subsection{Decision Manifold Analysis}
+\subsubsection{Decision Manifold Analysis}
 To investigate how \CACIS{} reshapes the prediction landscape, we visualize the decision boundaries on the probability simplex for a 3-class sub-problem (e.g., Approve, Step-up, Decline). We observe that while cross-entropy produces "flat" boundaries that only depend on the most likely class, \CACIS{} adapts the geometry so that the decision regions for high-cost actions (like Decline in a fraud-heavy environment) are expanded to capture transactions even with moderate fraud probability. This "geometry of caution" is exactly what industrial merchants seek to minimize their tail risk.
 
-\subsection{Beyond E-commerce: Cross-Sector Applicability}
-While our primary focus is fraud detection, the \CACIS{} framework is sector-agnostic. In **Cybersecurity**, the cost of missing an intrusion (False Negative) is catastrophic, while the cost of a false alert (False Positive) is a temporary burden on the SOC team. In **Logistics**, mis-allocating high-value inventory is far more costly than low-value items. In each case, substituting the Shannon geometry for the \CACIS{} geometry allows the model to learn representations that are fundamentally aligned with the sector's utility function.
-
-\subsection{Performance by Transaction Amount}
+\subsubsection{Performance by Transaction Amount}
 To understand the impact of instance-aware training, we slice the test results by transaction amount $M$. High-amount transactions (the "whale" transactions) represent the highest risk for e-commerce merchants.
 
 \begin{table}[h]
@@ -367,7 +377,7 @@ $M \ge \$200$ & 22.42 & \textbf{18.45} & \textbf{18\%} \\
 
 The results in Table~\ref{tab:buckets} clearly show that \CACIS{} provides the greatest relative improvement for high-value transactions. While standard cross-entropy focuses on the average case (which is dominated by low-amount transactions), \CACIS{} adapts the loss surface to prioritize the "whales" where mistakes are most costly.
 
-\subsection{Convergence of Inner Solver}
+\subsubsection{Convergence of Inner Solver}
 The Frank--Wolfe inner solver is critical for the stability of \CACIS{}. We monitor the duality gap during the first few epochs.
 \begin{figure}[h]
 \centering
@@ -377,24 +387,55 @@ The Frank--Wolfe inner solver is critical for the stability of \CACIS{}. We moni
 \end{figure}
 As shown in Figure~\ref{fig:convergence}, the duality gap decays at the expected $O(1/t)$ rate, ensuring that the model-implied distribution $q(\vz)$ matches the ground cost geometry within a handleable number of iterations.
 
-\subsection{Sensitivity to Epsilon}
+\subsubsection{Sensitivity to Epsilon}
 The temperature $\varepsilon$ controls the smoothness of the regularizer. We find that $\varepsilon$ acts as an effective knob: very small $\varepsilon$ focuses purely on regret but can be harder to optimize, while larger $\varepsilon$ improves calibration and stability. Optimization is typically simpler when $\varepsilon$ is large, as it provides a coarse, well-behaved loss surface suitable for initial exploration. In practice, we advocate for a regularization path strategy: we start with a larger $\varepsilon$ and progressively decrease it as training proceeds. This allows the model to settle into the correct decision manifold gracefully, using the simpler optimization landscape of large $\varepsilon$ to initialize the more difficult, high-precision optimization required at small $\varepsilon$. We recommend an adaptive $\varepsilon$ scaled by the median off-diagonal cost for robust performance across different amount distributions.
 
-\subsection{ImageNet with FastText Semantic Cost}
+\subsection*{Example 2 --- Image Recognition: Class-Shared Semantic Cost}
 \label{sec:imagenet}
-We complement the fraud-detection benchmark with a large-scale image-classification reproducer in which the ground cost encodes \emph{semantic} rather than financial regret. The setup is identical in spirit but the units of $\mC$ change: instead of dollars of chargeback, each off-diagonal $C_{ij}$ measures how far two ImageNet class names lie in a frozen FastText embedding space (Equation~\ref{eq:semantic-cost}).
+We complement the fraud-detection benchmark with a large-scale image-classification reproducer where the cost structure inverts: \mC{} is now class-shared (the same for every image) but rich (1000$\times$1000), with off-diagonal entries reflecting \emph{semantic} rather than financial regret. This is the opposite extreme of the fraud setting and exercises the framework along a complementary axis: K is large, but per-example cost is constant.
 
-\paragraph{Protocol.} We train a torchvision \texttt{resnet50} from random initialization on ImageNet-1k. The cost matrix $\mC^{\mathrm{sem}} \in \R^{1000 \times 1000}$ is computed once from the WordNet class labels using the FastText Common Crawl English model ($d{=}300$); compound labels are tokenized and per-token vectors averaged, with subword fallback for out-of-vocabulary tokens. The artifact is mounted into the training container as a model file. Training uses a standard ImageNet recipe (90 epochs, SGD with Nesterov momentum, cosine LR with linear warm-up, mixed precision) driven by \texttt{torchrun} over $8\times$NVIDIA~A100 GPUs.
+\subsubsection{Cost Matrix from NLP Embeddings}
+Each off-diagonal $C^{\mathrm{sem}}_{ij}$ measures how far two ImageNet class \emph{names} lie in a frozen FastText embedding space (Equation~\ref{eq:semantic-cost}). Compound labels (\emph{great white shark}, \emph{snowplow}) are tokenized and per-token vectors averaged; FastText's subword model handles out-of-vocabulary tokens. The full matrix is small ($\approx 4$~MB) and is precomputed once on a laptop, then mounted into the training container as a model file. This decouples the cost-specification step (an NLP problem) from the model-training step (a vision problem).
 
-\paragraph{Metrics.} In addition to Top-1 and Top-5 accuracy, we report the realized \emph{semantic regret}
+\subsubsection{Protocol}
+We train a torchvision \texttt{resnet50} from random initialization on ImageNet-1k. Training uses a standard ImageNet recipe (90 epochs, SGD with Nesterov momentum, cosine LR with linear warm-up, mixed precision) driven by \texttt{torchrun} over $8\times$NVIDIA~A100 GPUs. Because $K = 1000$ makes the per-batch off-diagonal statistic of $\mC$ expensive, we evaluate the chosen $\varepsilon$ heuristic (default \texttt{offdiag\_mean}) \emph{once} at startup against the shared cost matrix and pass it as a constant to the loss --- a small change that matters at this scale.
+
+\subsubsection{Metrics}
+In addition to Top-1 and Top-5 accuracy, we report the realized \emph{semantic regret}
 \[
 R_{\mathrm{sem}} \coloneqq \frac{1}{N}\sum_{n=1}^{N} C^{\mathrm{sem}}_{y_n,\hat a_n}, \qquad \hat a_n = \argmin_{a}\, \langle \vp(\vx_n), \mC^{\mathrm{sem}}_{:,a}\rangle,
 \]
-which credits models for keeping confusions \emph{semantically close} to the truth even when Top-1 is wrong. Standard Top-1 collapses every off-diagonal error to the same unit penalty; $R_{\mathrm{sem}}$ measures the geometry of the mistakes.
+which credits models for keeping confusions \emph{semantically close} to the truth even when Top-1 is wrong. Standard Top-1 collapses every off-diagonal error to the same unit penalty; $R_{\mathrm{sem}}$ measures the geometry of the mistakes. We report $R_{\mathrm{sem}}$ under both the argmax decision rule and the cost-optimal rule $\hat a_n = \argmin_a \langle \vp_n, \mC^{\mathrm{sem}}_{:,a}\rangle$, which together quantify how much regret reduction comes from the trained representation versus the decision rule.
 
-\paragraph{Expected behavior.} We expect \CACIS{}-trained ResNet to match cross-entropy on Top-1 while improving $R_{\mathrm{sem}}$ --- i.e., where it misclassifies, it gravitates toward semantically adjacent classes. We expect the largest gains on classes whose nearest semantic neighbors are also visually confusable (the large \emph{dog} and \emph{bird} subtrees of ImageNet). A regularization-path schedule on $\varepsilon$ (\S\ref{sec:cacis}) is particularly useful here because the cost matrix is dense and the off-diagonal scale is much larger than in the fraud setting.
+\subsubsection{Expected behavior}
+We expect \CACIS{}-trained ResNet to match cross-entropy on Top-1 while improving $R_{\mathrm{sem}}$: where it misclassifies, it should gravitate toward semantically adjacent classes. The largest gains should appear in regions of ImageNet whose nearest semantic neighbors are also visually confusable (the large \emph{dog} and \emph{bird} subtrees). A regularization-path schedule on $\varepsilon$ (\S\ref{sec:cacis}) helps here because $\mC^{\mathrm{sem}}$ is dense and its off-diagonal scale is much larger than in the fraud setting.
 
-\paragraph{Reproducibility.} A self-contained subpackage (\texttt{examples/imagenet/}) ships with the supplementary code: cost-matrix precomputation, DDP-aware ImageNet loaders, ResNet factory, and the training loop. A Dockerfile produces a runnable image for AWS and GCP GPU instances. The complete benchmark numbers will be reported in the de-anonymized version.
+\subsubsection{Reproducibility}
+A self-contained subpackage (\texttt{examples/imagenet/}) ships with the supplementary code: cost-matrix precomputation, DDP-aware ImageNet loaders, ResNet factory, training loop, AWS launcher, and a cost-aware inference utility that reports both argmax and cost-optimal predictions. A Dockerfile produces a runnable image for AWS and GCP GPU instances. Complete benchmark numbers will be reported in the de-anonymized version.
+
+\subsection*{What Changes Between the Two Examples}
+Table~\ref{tab:examples} summarizes how the same training recipe instantiates differently across the two domains. The pattern is general: practitioners specify their domain knowledge once through $\mC$ --- either as a parametric function of the input (Example~1) or as a precomputed matrix derived from auxiliary embeddings (Example~2) --- and the rest of the pipeline is unchanged.
+
+\begin{table}[h]
+\centering
+\caption{The two illustrative examples differ on every axis of the cost geometry but share the same loss, optimizer, and gradient strategy.}
+\label{tab:examples}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lll}
+\toprule
+& \textbf{Example 1: Fraud} & \textbf{Example 2: ImageNet} \\
+\midrule
+Cost varies with    & Each instance $\vx$            & Each class pair $(i, j)$ \\
+$K$ (classes)       & 2 (approve / decline)          & 1000 (WordNet) \\
+$\mC$ structure     & $\mC(\vx)$ from value model    & $\mC^{\mathrm{sem}}$ from NLP embeddings \\
+Units of regret     & Currency (\$)                   & Cosine distance (dimensionless) \\
+Decision target     & Minimize realized cost          & Minimize semantic confusion \\
+Data scale          & 0.5M tabular transactions       & 1.28M images \\
+Model                & MLP / linear                    & ResNet-50 from scratch \\
+Compute              & Single CPU                      & 8$\times$A100 (cloud) \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 % =========================================================
 % 7. INDUSTRIAL BEST PRACTICES

@@ -118,6 +118,28 @@ def cleanup_distributed(info: DistInfo) -> None:
         dist.destroy_process_group()
 
 
+def _select_device(args: argparse.Namespace, dist_info: DistInfo) -> torch.device:
+    """
+    Pick a device, allowing CPU/MPS fallback when ``--allow-cpu`` is set.
+
+    Distributed training still requires CUDA — Gloo on CPU is supported by PyTorch
+    but the rest of the pipeline (AMP, NCCL) assumes a GPU. Local smoke-tests run
+    single-process, so this restriction does not block them.
+    """
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{dist_info.local_rank}")
+    if dist_info.is_distributed:
+        raise RuntimeError("Distributed training requires CUDA.")
+    if not args.allow_cpu:
+        raise RuntimeError(
+            "CUDA is not available. Pass --allow-cpu for local smoke-tests "
+            "(see examples.imagenet.smoke_test)."
+        )
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 # =============================================================================
 # Loss factory
 # =============================================================================
@@ -405,6 +427,8 @@ def parse_args() -> argparse.Namespace:
     # Model
     p.add_argument("--arch", type=str, default="resnet50",
                    choices=["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"])
+    p.add_argument("--num-classes", type=int, default=1000,
+                   help="Output classes. 1000 for real ImageNet; smaller for smoke tests.")
 
     # Loss
     p.add_argument("--loss", type=str, default="sinkhorn_envelope",
@@ -426,6 +450,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warmup-epochs", type=int, default=5)
     p.add_argument("--no-amp", action="store_true",
                    help="Disable mixed precision (debug only — much slower / more memory).")
+    p.add_argument("--allow-cpu", action="store_true",
+                   help="Allow CPU/MPS fallback when CUDA is unavailable (local smoke-tests).")
+    p.add_argument("--max-train-batches", type=int, default=None,
+                   help="Cap training batches per epoch (smoke-tests).")
+    p.add_argument("--max-val-batches", type=int, default=None,
+                   help="Cap validation batches per evaluation (smoke-tests).")
+    p.add_argument("--quick", action="store_true",
+                   help="Smoke-test preset: --max-train-batches 5 --max-val-batches 2.")
 
     # Output
     p.add_argument("--output-dir", type=Path, default=Path("imagenet_output"))
@@ -442,6 +474,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    # --quick is sugar for the two batch caps; explicit caps still win.
+    if args.quick:
+        if args.max_train_batches is None:
+            args.max_train_batches = 5
+        if args.max_val_batches is None:
+            args.max_val_batches = 2
+
     dist_info = init_distributed()
 
     logging.basicConfig(
@@ -450,12 +490,10 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for ImageNet training.")
-    device = torch.device(f"cuda:{dist_info.local_rank}")
+    device = _select_device(args, dist_info)
 
     torch.manual_seed(args.seed + dist_info.rank)
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = (device.type == "cuda")
 
     run_dir = args.output_dir / args.run_id
     if dist_info.is_main:
@@ -500,7 +538,7 @@ def main() -> None:
     # -------------------------
     # Model
     # -------------------------
-    model: nn.Module = build_resnet(args.arch, num_classes=1000).to(device)
+    model: nn.Module = build_resnet(args.arch, num_classes=args.num_classes).to(device)
     if dist_info.is_distributed:
         model = DDP(model, device_ids=[dist_info.local_rank])
 
@@ -540,7 +578,9 @@ def main() -> None:
         optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps],
     )
 
-    scaler = GradScaler(enabled=not args.no_amp)
+    # AMP is CUDA-only; silently disable on CPU/MPS.
+    use_amp = (not args.no_amp) and device.type == "cuda"
+    scaler = GradScaler(enabled=use_amp)
 
     # -------------------------
     # Resume
@@ -570,11 +610,13 @@ def main() -> None:
         train_stats = train_one_epoch(
             model, train_loader, loss_fn, optimizer, scheduler, scaler, device,
             epoch=epoch, dist_info=dist_info, log_every=args.log_every,
-            use_amp=not args.no_amp, cost_matrix=cost_matrix,
+            use_amp=use_amp, cost_matrix=cost_matrix,
+            max_batches=args.max_train_batches,
         )
         val_stats = evaluate(
             model, val_loader, device,
             cost_matrix=cost_matrix, dist_info=dist_info,
+            max_batches=args.max_val_batches,
         )
 
         if dist_info.is_main:

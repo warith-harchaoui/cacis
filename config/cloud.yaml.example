@@ -1,0 +1,73 @@
+# =============================================================================
+# config/cloud.yaml.example
+#
+# Template for AWS-side ImageNet training. Copy this file to config/cloud.yaml
+# (which is gitignored), fill in your account-specific values, and launch with:
+#
+#   python -m examples.imagenet.cloud.launch_ec2 --config config/cloud.yaml
+#
+# The launcher provisions a single multi-GPU EC2 instance, mounts data from
+# S3, runs the training container, syncs results back to S3, and (optionally)
+# terminates the instance.
+#
+# Required AWS resources you must provision **once** before launching:
+#   - ECR repository holding the cacis-imagenet image (see examples/imagenet/Dockerfile)
+#   - S3 bucket with ImageNet under data.imagenet_s3
+#   - S3 object for the precomputed cost matrix
+#   - EC2 key pair (for SSH), VPC subnet, security group (SSH from your IP)
+#   - IAM role attached to the instance that allows: ECR pull, S3 r/w on the
+#     buckets used here, and ec2:TerminateInstances on the instance itself
+#
+# IAM permissions required for the **launcher user** (the one running this script):
+#   ec2:RunInstances, ec2:DescribeInstances, ec2:CreateTags,
+#   iam:PassRole (on the instance profile role)
+# =============================================================================
+
+run_id: resnet50-fasttext-001
+
+aws:
+  region: us-east-1
+  profile: null           # AWS CLI profile name, or null to use default credentials
+
+container:
+  # ECR URI for the cacis-imagenet image (built from examples/imagenet/Dockerfile).
+  image_uri: 123456789012.dkr.ecr.us-east-1.amazonaws.com/cacis-imagenet:latest
+
+ec2:
+  # 8x A100 40GB. Lower-cost alternatives: g5.48xlarge (8x A10G).
+  instance_type: p4d.24xlarge
+
+  # AWS Deep Learning AMI (Ubuntu 22.04, GPU) for your region. List with:
+  #   aws ec2 describe-images --owners amazon \
+  #     --filters "Name=name,Values=Deep Learning AMI GPU PyTorch 2.* (Ubuntu 22.04)*"
+  ami_id: ami-XXXXXXXXXXXXXXXXX
+
+  key_name: my-keypair                     # EC2 key pair (for SSH if you need to debug)
+  subnet_id: subnet-XXXXXXXX               # Must support GPU instance types + have NAT/IGW
+  security_group_ids:
+    - sg-XXXXXXXX                          # SSH ingress + egress to S3/ECR
+  iam_instance_profile: cacis-imagenet-ec2 # Profile NAME (not ARN). Grants ECR pull + S3 r/w + self-terminate.
+
+  root_volume_size_gb: 200                 # OS + Docker layers; ImageNet itself is staged on instance NVMe
+  terminate_on_complete: true              # Self-terminate after training (saves cost)
+
+data:
+  imagenet_s3: s3://my-bucket/datasets/imagenet/    # Must contain train/, val/, LOC_synset_mapping.txt
+  cost_matrix_s3: s3://my-bucket/cacis/cost_matrix.pt
+  output_s3_prefix: s3://my-bucket/cacis/runs/      # outputs go to <output_s3_prefix>/<run_id>/
+
+training:
+  # All keys here are passed verbatim to examples.imagenet.train (with `_` → `-`).
+  loss: sinkhorn_envelope          # cross_entropy | sinkhorn_envelope | sinkhorn_autodiff | sinkhorn_pot
+  arch: resnet50                   # resnet18 | resnet34 | resnet50 | resnet101 | resnet152
+  batch_size: 64                   # per GPU; global batch = batch_size * num_gpus_on_instance
+  epochs: 90
+  lr: 0.1                          # scaled by global_batch / 256 inside train.py
+  warmup_epochs: 5
+  weight_decay: 1.0e-4
+  label_smoothing: 0.1
+  sinkhorn_max_iter: 20
+  epsilon_mode: offdiag_mean       # offdiag_mean | offdiag_median | offdiag_max | constant
+  epsilon_scale: 1.0
+  num_workers: 8
+  resume: false                    # set true to continue from a checkpoint in output_s3_prefix

@@ -235,4 +235,11 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Cloud configs (keep the .example template + config/README.md tracked; ignore real configs)
+config/cloud.yaml
+config/cloud-*.yaml
+config/*.local.yaml
+!config/cloud.yaml.example
+
+
 

@@ -1,6 +1,6 @@
 # 🚀 Cost-Aware Classification + Fraud Benchmark (IEEE-CIS)
 
-**Author:** Warith Harchaoui <wharchaoui@nexton-group.com>
+**Author:** [Warith Harchaoui, Ph.D.](https://www.linkedin.com/in/warith-harchaoui/)
 
 Corporate research/engineering repository for **cost-aware classification** with **example-dependent misclassification costs**. This toolbox transforms traditional machine learning from "matching labels" to "**maximizing business profit**".
 
@@ -29,6 +29,8 @@ This repository implements **Optimal Transport (OT)** based loss functions that 
 - [Documentation & Resources](#-documentation)
 - [Tests](#-tests)
 - [ImageNet with FastText Semantic Cost](#-imagenet-with-fasttext-semantic-cost)
+- [Launching on AWS](#-launching-on-aws)
+- [Inference](#-inference)
 - [Citation](#-citation)
 - [License](#-license)
 
@@ -644,7 +646,74 @@ torchrun --nnodes=2 --node-rank=$NODE_RANK \
 | `examples/imagenet/data.py` | DDP-aware ImageNet DataLoaders. |
 | `examples/imagenet/model.py` | torchvision ResNet factory (no pretrained weights). |
 | `examples/imagenet/train.py` | DDP + AMP training loop. Reports Top-1, Top-5, and realized semantic regret. |
+| `examples/imagenet/inference.py` | Cost-aware prediction (single image, directory, full val). |
 | `examples/imagenet/Dockerfile` | Container for AWS/GCP GPU instances. |
+
+## ☁️ Launching on AWS
+
+A config-driven launcher provisions a single multi-GPU EC2 instance, stages ImageNet from S3, runs the training container, syncs results back, and self-terminates. No SageMaker abstractions, no shim scripts — just `ec2:RunInstances` with a self-contained user-data bootstrap.
+
+### 1. Copy the config template
+
+```bash
+cp config/cloud.yaml.example config/cloud.yaml
+# Fill in: aws.region, container.image_uri, ec2.{ami_id, key_name, subnet_id, security_group_ids, iam_instance_profile}, and the s3 paths.
+```
+
+The real `config/cloud.yaml` is gitignored. The instance profile referenced under `ec2.iam_instance_profile` must allow ECR pull, S3 r/w on the data and output buckets, and (if `terminate_on_complete: true`) `ec2:TerminateInstances` scoped to the instance.
+
+### 2. Push the Docker image to ECR
+
+See `examples/imagenet/Dockerfile` header comments for the exact ECR commands.
+
+### 3. Launch
+
+```bash
+# Render and print the bootstrap script (no AWS calls):
+python -m examples.imagenet.cloud.launch_ec2 --config config/cloud.yaml --dry-run
+
+# Actually launch:
+python -m examples.imagenet.cloud.launch_ec2 --config config/cloud.yaml
+```
+
+The script prints the instance id and an `aws ssm start-session` command for attaching. Live logs land in `/var/log/cacis-bootstrap.log` on the instance; the same log is also uploaded to S3 alongside the model outputs.
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `config/cloud.yaml.example` | Annotated template — copy to `config/cloud.yaml`. |
+| `examples/imagenet/cloud/config.py` | Typed YAML loader with descriptive errors. |
+| `examples/imagenet/cloud/launch_ec2.py` | Renders user-data and calls `ec2:RunInstances`. CLI + `--dry-run`. |
+
+> **Multi-node clusters** (e.g. 2 × p4d.24xlarge = 16 × A100) are out of scope for this single-instance launcher; for that, AWS ParallelCluster or SageMaker is the right tool. The training script itself is already multi-node-ready under `torchrun` (see `examples/imagenet/train.py` docstring).
+
+## 🔮 Inference
+
+`examples/imagenet/inference.py` loads a trained checkpoint and supports three modes. When a cost matrix is provided, it reports **both** the standard `argmax` prediction and the **cost-optimal action** under expected-regret minimization.
+
+```bash
+# Single image: top-5 + cost-optimal action label
+python -m examples.imagenet.inference \
+    --checkpoint imagenet_output/resnet50_fasttext/checkpoint_best.pt \
+    --cost-matrix cost_matrix.pt \
+    --image /path/to/photo.jpg --topk 5
+
+# Directory of images → predictions.csv
+python -m examples.imagenet.inference \
+    --checkpoint .../checkpoint_best.pt \
+    --cost-matrix cost_matrix.pt \
+    --input-dir /path/to/photos/ \
+    --output predictions.csv
+
+# ImageFolder val set: Top-1, Top-5, and realized regret under both rules
+python -m examples.imagenet.inference \
+    --checkpoint .../checkpoint_best.pt \
+    --cost-matrix cost_matrix.pt \
+    --val-dir /data/imagenet/val
+```
+
+The full-validation mode also serves as a regret-vs-argmax ablation: it reports realized regret under the standard top-1 rule and under cost-optimal decisions, side by side.
 
 ## ✍️ Citation
 
