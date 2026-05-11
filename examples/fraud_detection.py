@@ -844,11 +844,11 @@ def train_one(
         # Train Smoothing plots
         if "train_expected_opt_regret" in state.train_smoothed:
             baselines = {}
-            if "train_naive_approve_expected_regret" in state.train_smoothed:
-                baselines["Naive (Approve)"] = state.train_smoothed["train_naive_approve_expected_regret"]
-            if "train_naive_decline_expected_regret" in state.train_smoothed:
-                baselines["Naive (Decline)"] = state.train_smoothed["train_naive_decline_expected_regret"]
-            
+            if "train_approve_all_expected_regret" in state.train_smoothed:
+                baselines["Naive (Approve)"] = state.train_smoothed["train_approve_all_expected_regret"]
+            if "train_decline_all_expected_regret" in state.train_smoothed:
+                baselines["Naive (Decline)"] = state.train_smoothed["train_decline_all_expected_regret"]
+
             plot_metric_trajectory(
                 iters=state.train_smoothed_iters,
                 values=state.train_smoothed["train_expected_opt_regret"],
@@ -861,10 +861,10 @@ def train_one(
 
         if "train_realized_regret" in state.train_smoothed:
             baselines_real = {}
-            if "train_naive_approve_realized_regret" in state.train_smoothed:
-                baselines_real["Naive (Approve)"] = state.train_smoothed["train_naive_approve_realized_regret"]
-            if "train_naive_decline_realized_regret" in state.train_smoothed:
-                baselines_real["Naive (Decline)"] = state.train_smoothed["train_naive_decline_realized_regret"]
+            if "train_approve_all_realized_regret" in state.train_smoothed:
+                baselines_real["Naive (Approve)"] = state.train_smoothed["train_approve_all_realized_regret"]
+            if "train_decline_all_realized_regret" in state.train_smoothed:
+                baselines_real["Naive (Decline)"] = state.train_smoothed["train_decline_all_realized_regret"]
 
             plot_metric_trajectory(
                 iters=state.train_smoothed_iters,
@@ -916,10 +916,11 @@ def train_one(
                     y_quantile_max=None
                 )
             if "expected_opt_regret" in state.val_points:
-                # Baseline: Only Approve All
                 baselines_val = {}
-                if "naive_approve_expected_cost" in state.val_points:
-                    baselines_val["Naive (Approve)"] = state.val_points["naive_approve_expected_cost"]
+                if "approve_all_expected_cost" in state.val_points:
+                    baselines_val["Naive (Approve)"] = state.val_points["approve_all_expected_cost"]
+                if "decline_all_expected_cost" in state.val_points:
+                    baselines_val["Naive (Decline)"] = state.val_points["decline_all_expected_cost"]
 
                 plot_metric_trajectory(
                     iters=state.val_iters,
@@ -932,10 +933,11 @@ def train_one(
                     y_quantile_max=None
                 )
             if "realized_regret" in state.val_points:
-                # Baseline: Only Approve All
                 baselines_val_real = {}
-                if "naive_approve_realized_cost" in state.val_points:
-                    baselines_val_real["Naive (Approve)"] = state.val_points["naive_approve_realized_cost"]
+                if "approve_all_realized_cost" in state.val_points:
+                    baselines_val_real["Naive (Approve)"] = state.val_points["approve_all_realized_cost"]
+                if "decline_all_realized_cost" in state.val_points:
+                    baselines_val_real["Naive (Decline)"] = state.val_points["decline_all_realized_cost"]
 
                 plot_metric_trajectory(
                     iters=state.val_iters,

@@ -28,6 +28,7 @@ This repository implements **Optimal Transport (OT)** based loss functions that 
 - [Choosing a Loss Function](#-choosing-a-loss-function)
 - [Documentation & Resources](#-documentation)
 - [Tests](#-tests)
+- [ImageNet with FastText Semantic Cost](#-imagenet-with-fasttext-semantic-cost)
 - [Citation](#-citation)
 - [License](#-license)
 
@@ -570,6 +571,80 @@ train_precision_recall_curve.png # Training PR curve
 - [**`docs/math.md`**](docs/math.md) — Mathematical foundations and the explicit mapping between $\varepsilon$ and POT's `reg` parameter.
 - [**`docs/fraud_business_and_cost_matrix.md`**](docs/fraud_business_and_cost_matrix.md) — Business value model and per-example cost matrix construction for fraud detection.
 - [**`examples/sinkhorn_pot_example.py`**](examples/sinkhorn_pot_example.py) — Standalone example demonstrating `SinkhornPOTLoss` usage.
+
+## 🖼️ ImageNet with FastText Semantic Cost
+
+Beyond fraud, the same cost-aware machinery applies to **semantic classification**: a confusion between *tiger* and *leopard* is much less costly than a confusion between *tiger* and *minivan*. The `examples/imagenet/` subpackage trains a torchvision ResNet from scratch on ImageNet-1k with a 1000×1000 cost matrix built from **FastText** class-name embeddings.
+
+### Pipeline
+
+1. **Precompute the cost matrix (once, on a laptop).** Embeds each of the 1000 ImageNet class names with FastText and writes `C[i, j] = 1 − cos(emb_i, emb_j)`.
+   ```bash
+   python -m examples.imagenet.cost_matrix \
+       --data-root /data/imagenet \
+       --fasttext /models/cc.en.300.bin \
+       --out cost_matrix.pt
+   ```
+   The result is a small (~4 MB) `cost_matrix.pt` file mounted into training as a model artifact.
+2. **Train.** DDP-aware, AMP-on, cosine LR with linear warmup.
+   ```bash
+   torchrun --standalone --nproc-per-node=8 \
+       -m examples.imagenet.train \
+       --data-root /data/imagenet \
+       --cost-matrix cost_matrix.pt \
+       --loss sinkhorn_envelope \
+       --batch-size 64 --epochs 90
+   ```
+
+### Loss recommendation for K=1000
+
+- **`sinkhorn_envelope`** (default) — GPU-native, memory-efficient envelope gradient. **Recommended for ImageNet.**
+- **`sinkhorn_autodiff`** — only for ablation; memory cost scales with `sinkhorn-max-iter`.
+- **`sinkhorn_pot`** — slow at K=1000 because POT's solver runs per example. Reserve for K ≲ 100.
+
+`offdiag_mean` ε is computed **once** from the shared cost matrix at startup and converted to a constant — avoiding a per-batch reduction over a (B, 1000²) mask.
+
+### Cloud setup (AWS / GCP)
+
+A self-contained Dockerfile lives at `examples/imagenet/Dockerfile`. The header comments include the exact ECR push, Artifact Registry push, and `docker run` commands for both clouds.
+
+**AWS — single multi-GPU EC2 (e.g. `p4d.24xlarge`):**
+```bash
+docker run --gpus all --shm-size=8g \
+    -v /mnt/imagenet:/data/imagenet:ro \
+    -v /mnt/output:/workspace/imagenet_output \
+    -v /mnt/models:/models:ro \
+    <acct>.dkr.ecr.<region>.amazonaws.com/cacis-imagenet:latest \
+    torchrun --standalone --nproc-per-node=8 \
+      -m examples.imagenet.train \
+        --data-root /data/imagenet \
+        --cost-matrix /models/cost_matrix.pt \
+        --loss sinkhorn_envelope \
+        --batch-size 64 --epochs 90 \
+        --output-dir /workspace/imagenet_output \
+        --run-id resnet50_fasttext
+```
+
+**GCP — single multi-GPU `a2-highgpu-8g`:** same command with the GCP-pushed image and a GCSFuse / persistent-disk mount in place of `/mnt/imagenet`.
+
+**Multi-node** (e.g. two `p4d.24xlarge` for 16 × A100): set `MASTER_ADDR` to the first node's IP and launch on each node with:
+```bash
+torchrun --nnodes=2 --node-rank=$NODE_RANK \
+    --nproc-per-node=8 --rdzv-backend=c10d \
+    --rdzv-endpoint=$MASTER_ADDR:29500 \
+    -m examples.imagenet.train ...
+```
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `examples/imagenet/cost_matrix.py` | Build `C` from FastText (`.bin` or `.vec`). CLI. |
+| `examples/imagenet/classnames.py` | Load ImageNet class labels in the canonical `ImageFolder` order. |
+| `examples/imagenet/data.py` | DDP-aware ImageNet DataLoaders. |
+| `examples/imagenet/model.py` | torchvision ResNet factory (no pretrained weights). |
+| `examples/imagenet/train.py` | DDP + AMP training loop. Reports Top-1, Top-5, and realized semantic regret. |
+| `examples/imagenet/Dockerfile` | Container for AWS/GCP GPU instances. |
 
 ## ✍️ Citation
 

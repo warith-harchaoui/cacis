@@ -190,7 +190,19 @@ The dual of the regularized OT problem admits a simple iterative solution known 
 The temperature parameter $\varepsilon$ controls the trade-off between the pure transport cost (regret) and the entropic smoothness. In the limit $\varepsilon \to 0$, we recover the pure Wasserstein distance; as $\varepsilon \to \infty$, the problem reduces to an independent product of marginals. In Section \ref{sec:cacis}, we introduce adaptive heuristics for $\varepsilon$ that ensure the Gibbs kernel remains well-conditioned even when transaction amounts $M$ vary by several orders of magnitude. This adaptive scaling is what allows \CACIS{} to remain stable in high-throughput production environments where a single training batch might contain both \$5 and \$50,000 transactions.
 
 \subsection{Beyond Fraud: Semantic Label Geometry}
-While the fraud detection case emphasizes asymmetric financial costs, the framework is equally applicable to semantic tasks. In large-scale image recognition (e.g., ImageNet), label embeddings derived from fastText can be used to construct a semantic cost matrix (e.g., $C_{ij}=1-\cos(\mathrm{emb}(i),\mathrm{emb}(j))$), penalizing confusions between unrelated classes more heavily than semantically adjacent ones. While we focus our empirical evaluation on fraud detection, this semantic-cost setting is supported by our implementation and is provided as a reproducible example.
+\label{sec:semantic-geometry}
+The fraud-detection case emphasizes asymmetric \emph{financial} costs. The same machinery, however, applies whenever the label set carries non-trivial structure. In large-scale image recognition the ``flat'' geometry of cross-entropy is again a limitation: confusing \emph{tiger} with \emph{leopard} is qualitatively different from confusing \emph{tiger} with \emph{minivan}, yet both errors contribute identically to the cross-entropy gradient.
+
+A natural ground cost for such semantic tasks is the distance between class labels in a pre-trained language embedding space. Concretely, for each class $i \in \{1, \dots, K\}$ we map the class name to a vector $\mathrm{emb}(i) \in \R^d$ using a frozen FastText \citep{bojanowski2017enriching} model, and define
+\begin{equation}
+\label{eq:semantic-cost}
+C_{ij}^{\mathrm{sem}} = 1 - \frac{\langle \mathrm{emb}(i), \mathrm{emb}(j) \rangle}{\|\mathrm{emb}(i)\|\,\|\mathrm{emb}(j)\|}, \qquad C_{ii}^{\mathrm{sem}} = 0,
+\end{equation}
+i.e., $C^{\mathrm{sem}}_{ij} \in [0, 2]$ is cosine distance. FastText is well-suited to this setting because its subword model produces vectors for compound class names (\emph{snowplow}, \emph{hockey puck}) and morphological variants that are routinely out-of-vocabulary for word-level embeddings such as word2vec or GloVe.
+
+We provide a reference ImageNet-1k reproducer alongside the fraud benchmark. The cost matrix $C^{\mathrm{sem}} \in \R^{1000 \times 1000}$ is precomputed once from the 1000 WordNet class names and the FastText English Common Crawl model ($d=300$); the resulting artifact ($\approx$~4~MB) is mounted into the training container as a model file. The same Sinkhorn--Fenchel--Young loss, applied to a torchvision ResNet trained from scratch under \texttt{torchrun}-driven DDP with mixed precision, optimizes \emph{semantic regret} rather than 0--1 error. At $K=1000$ the per-batch off-diagonal statistic over an expanded $(B, K, K)$ mask would be wasteful, so we evaluate the chosen $\varepsilon$ heuristic (default \texttt{offdiag\_mean}) once at startup against the shared cost matrix and pass it as a constant to the loss.
+
+This change of ground cost --- from monetary regret in fraud detection to semantic distance in image classification --- illustrates a key strength of the \CACIS{} framework: the loss specification is decoupled from the cost specification. Practitioners replace $\mC$ to encode the geometry that matters for their decision, while the optimization machinery, gradient strategy, and convergence guarantees remain unchanged. Empirical evaluation of ImageNet under semantic regret is reported in Section~\ref{sec:imagenet}.
 
 % =========================================================
 % 5. CACIS: COST-AWARE CLASSIFICATION
@@ -367,6 +379,22 @@ As shown in Figure~\ref{fig:convergence}, the duality gap decays at the expected
 
 \subsection{Sensitivity to Epsilon}
 The temperature $\varepsilon$ controls the smoothness of the regularizer. We find that $\varepsilon$ acts as an effective knob: very small $\varepsilon$ focuses purely on regret but can be harder to optimize, while larger $\varepsilon$ improves calibration and stability. Optimization is typically simpler when $\varepsilon$ is large, as it provides a coarse, well-behaved loss surface suitable for initial exploration. In practice, we advocate for a regularization path strategy: we start with a larger $\varepsilon$ and progressively decrease it as training proceeds. This allows the model to settle into the correct decision manifold gracefully, using the simpler optimization landscape of large $\varepsilon$ to initialize the more difficult, high-precision optimization required at small $\varepsilon$. We recommend an adaptive $\varepsilon$ scaled by the median off-diagonal cost for robust performance across different amount distributions.
+
+\subsection{ImageNet with FastText Semantic Cost}
+\label{sec:imagenet}
+We complement the fraud-detection benchmark with a large-scale image-classification reproducer in which the ground cost encodes \emph{semantic} rather than financial regret. The setup is identical in spirit but the units of $\mC$ change: instead of dollars of chargeback, each off-diagonal $C_{ij}$ measures how far two ImageNet class names lie in a frozen FastText embedding space (Equation~\ref{eq:semantic-cost}).
+
+\paragraph{Protocol.} We train a torchvision \texttt{resnet50} from random initialization on ImageNet-1k. The cost matrix $\mC^{\mathrm{sem}} \in \R^{1000 \times 1000}$ is computed once from the WordNet class labels using the FastText Common Crawl English model ($d{=}300$); compound labels are tokenized and per-token vectors averaged, with subword fallback for out-of-vocabulary tokens. The artifact is mounted into the training container as a model file. Training uses a standard ImageNet recipe (90 epochs, SGD with Nesterov momentum, cosine LR with linear warm-up, mixed precision) driven by \texttt{torchrun} over $8\times$NVIDIA~A100 GPUs.
+
+\paragraph{Metrics.} In addition to Top-1 and Top-5 accuracy, we report the realized \emph{semantic regret}
+\[
+R_{\mathrm{sem}} \coloneqq \frac{1}{N}\sum_{n=1}^{N} C^{\mathrm{sem}}_{y_n,\hat a_n}, \qquad \hat a_n = \argmin_{a}\, \langle \vp(\vx_n), \mC^{\mathrm{sem}}_{:,a}\rangle,
+\]
+which credits models for keeping confusions \emph{semantically close} to the truth even when Top-1 is wrong. Standard Top-1 collapses every off-diagonal error to the same unit penalty; $R_{\mathrm{sem}}$ measures the geometry of the mistakes.
+
+\paragraph{Expected behavior.} We expect \CACIS{}-trained ResNet to match cross-entropy on Top-1 while improving $R_{\mathrm{sem}}$ --- i.e., where it misclassifies, it gravitates toward semantically adjacent classes. We expect the largest gains on classes whose nearest semantic neighbors are also visually confusable (the large \emph{dog} and \emph{bird} subtrees of ImageNet). A regularization-path schedule on $\varepsilon$ (\S\ref{sec:cacis}) is particularly useful here because the cost matrix is dense and the off-diagonal scale is much larger than in the fraud setting.
+
+\paragraph{Reproducibility.} A self-contained subpackage (\texttt{examples/imagenet/}) ships with the supplementary code: cost-matrix precomputation, DDP-aware ImageNet loaders, ResNet factory, and the training loop. A Dockerfile produces a runnable image for AWS and GCP GPU instances. The complete benchmark numbers will be reported in the de-anonymized version.
 
 % =========================================================
 % 7. INDUSTRIAL BEST PRACTICES

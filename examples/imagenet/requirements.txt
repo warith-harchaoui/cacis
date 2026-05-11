@@ -1,0 +1,4 @@
+# Extra deps for the ImageNet pipeline. The base project's requirements.txt
+# already pulls torch, torchvision, numpy, scikit-learn, etc.
+torchvision>=0.18
+fasttext-wheel>=0.9.2

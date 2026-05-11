@@ -267,22 +267,15 @@ def plot_metric_trajectory(
 
     if y_quantile_max is not None and val.size > 0:
         top = float(np.quantile(val, float(y_quantile_max)))
-    if y_quantile_max is not None and val.size > 0:
-        top = float(np.quantile(val, float(y_quantile_max)))
         bottom = float(np.min(val))
-        
+
         if baselines:
             for b_vals in baselines.values():
                 b_arr = np.asarray(list(b_vals), dtype=float)
                 if len(b_arr) > 0:
-                     # For baselines, we might want full range or quantile? 
-                     # Let's use quantile 0.98 for top to avoid spikes, min for bottom
-                     top = max(top, float(np.quantile(b_arr, float(y_quantile_max))))
-                     bottom = min(bottom, float(np.min(b_arr)))
-             
-        pad = 0.1 * (top - bottom + 1e-12)
-        plt.ylim(bottom - pad, top + pad)
-             
+                    top = max(top, float(np.quantile(b_arr, float(y_quantile_max))))
+                    bottom = min(bottom, float(np.min(b_arr)))
+
         pad = 0.1 * (top - bottom + 1e-12)
         plt.ylim(bottom - pad, top + pad)
 
