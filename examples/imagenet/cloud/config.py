@@ -67,7 +67,7 @@ class InstanceConfig:
     num_gpus: int = 1
     min_disk_gb: int = 250
     max_price_per_hour: float = 0.50
-    min_reliability: float = 0.95
+    min_reliability: float = 0.99   # raised from 0.95 after seeing CDI / driver failures
     cuda_max_good: float = 12.4
 
     @classmethod

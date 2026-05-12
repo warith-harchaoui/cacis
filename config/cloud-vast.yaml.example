@@ -35,8 +35,8 @@ instance:
   num_gpus: 1
   min_disk_gb: 250          # ImageNet ~150 GB extracted + outputs + slack
   max_price_per_hour: 0.50  # bid ceiling in USD/hour
-  min_reliability: 0.95     # filter out flaky hosts
-  cuda_max_good: 12.4       # must support our PyTorch CUDA build
+  min_reliability: 0.99     # filter out flaky hosts (raise if you see CDI / driver errors)
+  cuda_max_good: 12.4       # must support our PyTorch CUDA build (the image needs ≥ 12.1; setting 12.4 gives headroom)
 
 # Output destination — rclone B2 remote (10 GB free tier)
 output:

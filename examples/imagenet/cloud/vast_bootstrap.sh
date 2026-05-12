@@ -28,8 +28,40 @@ LOG=/workspace/cacis-bootstrap.log
 exec > >(tee -a "$LOG") 2>&1
 
 echo "=== CACIS Vast.ai bootstrap @ $(date -u) ==="
-echo "GPU(s):"
-nvidia-smi -L || true
+
+# -----------------------------------------------------------------------------
+# Fast preflight — abort the whole run on any host-level showstopper instead of
+# cascading through every loss with "no data" / "no GPU" errors.
+# -----------------------------------------------------------------------------
+fatal() {
+    echo
+    echo "✗ FATAL: $*"
+    echo "  Aborting bootstrap (the loop over losses would only waste money)."
+    # Best-effort: ship the bootstrap log to B2 so we can see this remotely.
+    if command -v rclone >/dev/null 2>&1 \
+       && [[ -f "$HOME/.config/rclone/rclone.conf" || -n "${B2_KEY_ID:-}" ]]; then
+        rclone copy "$LOG" "${RCLONE_DEST:-/dev/null}/preflight_failure.log" \
+            --transfers 1 --checkers 1 2>/dev/null || true
+    fi
+    if [[ "${AUTO_DESTROY:-false}" == "true" && -n "${VAST_CONTAINERLABEL:-}" ]]; then
+        echo "  → self-destroying instance ${VAST_CONTAINERLABEL}"
+        curl -s -X DELETE \
+            "https://console.vast.ai/api/v0/instances/${VAST_CONTAINERLABEL}/?api_key=${VAST_API_KEY}" \
+            >/dev/null || true
+    fi
+    exit 1
+}
+
+echo "GPU check:"
+if ! nvidia-smi -L >/dev/null 2>&1; then
+    fatal "no GPU visible to the container (host driver or CDI issue)."
+fi
+nvidia-smi -L
+# Probe whether the host's CUDA driver is recent enough for our PyTorch image.
+if ! python3 -c "import torch; assert torch.cuda.is_available(), 'cuda not usable'" 2>/dev/null; then
+    fatal "torch.cuda.is_available() is False — host driver too old for the image's CUDA build."
+fi
+echo "  ✓ torch sees CUDA — driver compat OK"
 echo
 
 # -----------------------------------------------------------------------------
@@ -74,10 +106,22 @@ chmod 600 "$HOME/.config/rclone/rclone.conf"
 mkdir -p /data/imagenet && cd /data/imagenet
 if [[ ! -d "ILSVRC/Data/CLS-LOC/train" ]]; then
     echo "→ Downloading ImageNet from Kaggle (~150 GB) ..."
-    kaggle competitions download -c imagenet-object-localization-challenge
-    echo "→ Extracting ..."
-    unzip -q imagenet-object-localization-challenge.zip
-    rm -f imagenet-object-localization-challenge.zip
+    if ! kaggle competitions download -c imagenet-object-localization-challenge; then
+        fatal "kaggle download failed — accept the competition rules at https://www.kaggle.com/competitions/imagenet-object-localization-challenge/rules and verify KAGGLE_USERNAME / KAGGLE_KEY"
+    fi
+    zip_path="imagenet-object-localization-challenge.zip"
+    if [[ ! -s "$zip_path" ]] || [[ $(stat -c%s "$zip_path" 2>/dev/null || stat -f%z "$zip_path") -lt 100000000 ]]; then
+        fatal "downloaded zip is suspiciously small ($(ls -lh $zip_path 2>/dev/null || echo missing)) — Kaggle returned an error page instead of the dataset"
+    fi
+    echo "→ Extracting ($(du -h $zip_path | cut -f1)) ..."
+    if ! unzip -q "$zip_path"; then
+        fatal "unzip failed — disk full, corrupt download, or wrong file"
+    fi
+    rm -f "$zip_path"
+    if [[ ! -d "ILSVRC/Data/CLS-LOC/train" ]]; then
+        fatal "ILSVRC/Data/CLS-LOC/train still missing after extract"
+    fi
+    echo "  ✓ ImageNet present at /data/imagenet/ILSVRC"
 else
     echo "→ ImageNet already present at /data/imagenet/ILSVRC — skipping download."
 fi
