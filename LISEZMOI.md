@@ -152,3 +152,17 @@ Si vous utilisez ce travail, merci de citer :
 
 **Unlicense** — Ce logiciel est libre et appartient au domaine public.  
 Voir [UNLICENSE](unlicense.org) pour plus de détails.
+
+## 🙏 Remerciements
+
+Pour les ressources et les libraries :
+
+- [POT - Python Optimal Transport library](https://pythonot.github.io/)
+- [IEEE-CIS Kaggle competition](https://www.kaggle.com/c/ieee-fraud-detection)
+- [ImageNet Kaggle dataset](https://www.kaggle.com/c/imagenet-object-localization-challenge/data)
+- [FastText](https://fasttext.cc/)
+
+Et pour des discussions fructueuses qui ont rendu ce travail possible : 
+
+- [Bachir Zerroug](https://www.linkedin.com/in/bachirzerroug/)
+- [Edmond Jacoupeau](https://www.linkedin.com/in/edmond-jacoupeau/)

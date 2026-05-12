@@ -808,5 +808,13 @@ See [UNLICENSE](https://unlicense.org) for details.
 
 ## 🙏 Acknowledgments
 
-- POT library: https://pythonot.github.io/
-- IEEE-CIS Kaggle competition for the dataset
+For the resources and the libraries used:
+
+- [POT - Python Optimal Transport library](https://pythonot.github.io/)
+- [IEEE-CIS Kaggle competition](https://www.kaggle.com/c/ieee-fraud-detection)
+- [ImageNet Kaggle dataset](https://www.kaggle.com/c/imagenet-object-localization-challenge/data)
+- [FastText](https://fasttext.cc/)
+
+and for fruitful discussions that made this work possible:
+- [Bachir Zerroug](https://www.linkedin.com/in/bachirzerroug/)
+- [Edmond Jacoupeau](https://www.linkedin.com/in/edmond-jacoupeau/)
