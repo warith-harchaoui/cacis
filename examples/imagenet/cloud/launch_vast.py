@@ -246,7 +246,14 @@ def create_instance(
     onstart_cmd: str,
     api_key: str,
 ) -> Dict[str, Any]:
-    """Create the instance and return the JSON response from Vast.ai."""
+    """
+    Create the instance and return the JSON response from Vast.ai.
+
+    ``vastai create instance`` only **provisions** the box; it does NOT
+    transition it to ``running``. We follow up with ``vastai start instance``
+    so the onstart-cmd actually executes — otherwise the instance sits idle in
+    ``intended_status: stopped`` while still billing.
+    """
     raw = _run_vastai(
         [
             "create", "instance", str(offer_id),
@@ -258,7 +265,16 @@ def create_instance(
         ],
         api_key=api_key,
     )
-    return json.loads(raw)
+    response = json.loads(raw)
+    instance_id = response.get("new_contract") or response.get("id")
+    if instance_id:
+        try:
+            _run_vastai(["start", "instance", str(instance_id)], api_key=api_key)
+            logger.info("Started instance %s", instance_id)
+        except RuntimeError as exc:
+            logger.warning("start instance failed: %s — run `vastai start instance %s` manually",
+                           exc, instance_id)
+    return response
 
 
 # =============================================================================
