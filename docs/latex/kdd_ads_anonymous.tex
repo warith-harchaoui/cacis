@@ -96,7 +96,7 @@ This paper introduces \CACIS{} (Cost-Aware Classification with Informative Selec
   \item \textbf{Decision-aligned formulation.} We formalize classification as regret minimization under a user-supplied cost matrix $\mC$, and characterize the polyhedral decision regions it induces on the simplex (\S\ref{sec:decision}).
   \item \textbf{\CACIS{} loss and stable optimization.} We introduce a differentiable OT-based Fenchel--Young loss with a simplex-stable Frank--Wolfe inner solver (\S\ref{sec:cacis}).
   \item \textbf{Two illustrative examples with the same recipe.} We evaluate \CACIS{} in two distinct regimes that exercise the cost geometry along orthogonal axes: instance-dependent monetary cost in fraud detection (\S\ref{sec:exp-fraud}) and class-shared semantic cost in ImageNet image recognition (\S\ref{sec:imagenet}).
-  \item \textbf{Deployable software.} We release a modular PyTorch implementation, a Docker image, an AWS launcher, and a cost-aware inference utility, so practitioners can swap $\mC$ for their own decision geometry.
+  \item \textbf{Deployable software.} We release a modular PyTorch implementation, a Docker image, a Vast.ai cloud launcher, and a cost-aware inference utility, so practitioners can swap $\mC$ for their own decision geometry.
 \end{enumerate}
 
 \section{Notation and Formalism}
@@ -279,7 +279,7 @@ Envelope & Implicit & Low & High \\
 The "Envelope" method treats the optimal transport plan as a constant during backpropagation, which is efficient but can miss second-order dependencies. \CACIS{}'s Fenchel--Young structure provides mathematically exact gradients without the memory overhead of unrolled autodiff, making it our primary choice for high-throughput fraud systems.
 
 \paragraph{Reproducibility (double-blind).}
-To support reproducibility during review while preserving anonymity, we provide an anonymized reference implementation of \CACIS{} (including the Frank--Wolfe inner solver and semantic-cost examples) as supplementary material, and will de-anonymize the repository upon acceptance.
+To support reproducibility during review while preserving anonymity, we provide an anonymized reference implementation of \CACIS{} (including the Frank--Wolfe inner solver and semantic-cost examples) as supplementary material, and will de-anonymize the repository upon acceptance. Every figure in this paper is generated from on-disk metric files (\texttt{val\_metrics.csv} per run) by \texttt{scripts/make\_paper\_figures.py}, so reviewers can rebuild the figures verbatim from any new training run without re-rendering the paper LaTeX.
 
 \subsection{Industrial ROI: Why the Geometry Matters}
 From a business perspective, the mathematical transition from "likelihood" to "regret geometry" is not a mere technicality—it is a pivot towards direct value optimization. In a standard classifier, the gradient is driven by the \emph{probability} of being wrong. In \CACIS{}, the gradient is driven by the \emph{financial consequence} of being wrong.
@@ -324,7 +324,14 @@ We evaluate \CACIS{} on \emph{two complementary examples} that stress the framew
 We benchmark \CACIS{} against established baselines on a large-scale e-commerce dataset, focusing on the delta between traditional performance metrics (accuracy, AUC) and realized business utility (regret).
 
 \subsubsection{The IEEE-CIS/Vesta Protocol: Temporal Integrity}
-We utilize the IEEE-CIS Fraud Detection dataset \citep{kaggle_ieee_cis_2019}, which comprises over 500,000 transactions across a six-month period. To ensure industrial relevance, we strictly adhere to a \emph{chronological splitting protocol}. Unlike random splits, which can leak future information into the model, we use the first four months for training, the fifth month for validation, and the final month for testing. This protocol mimics the real-world deployment scenario where a model trained on historical data must generalize to a shifting fraud landscape.
+We utilize the IEEE-CIS Fraud Detection dataset \citep{kaggle_ieee_cis_2019}, which comprises over 500,000 transactions across a six-month period. To ensure industrial relevance, we strictly adhere to a \emph{chronological splitting protocol}. Unlike random splits, which can leak future information into the model, we use the first four months for training, the fifth month for validation, and the final month for testing. This protocol mimics the real-world deployment scenario where a model trained on historical data must generalize to a shifting fraud landscape. Figure~\ref{fig:temporal-split} shows the resulting distribution of \texttt{TransactionDT} across the two splits.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\columnwidth]{figures/fig_fraud_temporal_split.png}
+\caption{Chronological train / validation split of the IEEE-CIS dataset by \texttt{TransactionDT} (days since first transaction). The vertical dashed line marks the split point; the validation set strictly follows the training set in time.}
+\label{fig:temporal-split}
+\end{figure}
 
 \subsubsection{Performance Baselines and Statistical Rigor}
 We compare \CACIS{} against standard Cross-Entropy (CE), Weighted Cross-Entropy (WCE), and Focal Loss. We also introduce a ``Constant Baseline'' regret benchmark, which represents the business outcome of the best constant strategy (e.g., ``approve all'' or ``decline all'' based on historical prevalence). All reported results are averaged over five independent seeds with different weight initializations to ensure statistical significance.
@@ -349,6 +356,29 @@ Focal Loss & $9.28 \pm 0.10$ & $0.605 \pm 0.004$ & $0.018 \pm 0.002$ & $0.045 \p
 \end{table*}
 
 \CACIS{} achieves significant reduction in business regret while maintaining high AUC-PR and excellent calibration. This confirms that internalizing the cost geometry helps the model learn a more operational boundary in the feature space. We observe that while standard cross-entropy suffers from "calibration drift" on high-amount transactions, \CACIS{} remains robustly aligned with the business value metric across all transaction scales.
+
+\paragraph{Training dynamics.} Figures~\ref{fig:fraud-pr-auc}, \ref{fig:fraud-realized-regret}, and~\ref{fig:fraud-expected-regret} overlay the six losses on a single set of validation axes through the course of training. PR-AUC traces (Figure~\ref{fig:fraud-pr-auc}) reveal which losses sustain a separable decision boundary; realized regret (Figure~\ref{fig:fraud-realized-regret}) is the directly business-relevant quantity and is plotted alongside the ``approve-all'' naive baseline, which any deployable model must beat; the expected-optimal-regret view (Figure~\ref{fig:fraud-expected-regret}) tracks how well-calibrated the model would be under the optimal decision rule. All three figures are produced from the on-disk \texttt{val\_metrics.csv} via \texttt{scripts/make\_paper\_figures.py} and are re-creatable from data on any machine.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.98\columnwidth]{figures/fig_fraud_pr_auc.png}
+\caption{Validation PR-AUC vs.\ optimizer iterations on the IEEE-CIS / Vesta temporal split, smoothed with a 5-point rolling mean. Higher is better.}
+\label{fig:fraud-pr-auc}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.98\columnwidth]{figures/fig_fraud_realized_regret.png}
+\caption{Validation realized regret (\$ per transaction) under the model's cost-optimal decision rule, plotted against optimizer iterations. The dotted red line is the ``approve all'' naive baseline a deployable model must beat. Lower is better.}
+\label{fig:fraud-realized-regret}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.98\columnwidth]{figures/fig_fraud_expected_regret.png}
+\caption{Validation expected optimal regret. This metric captures the cost a perfectly calibrated downstream decision system would incur given the model's probabilities. Lower is better.}
+\label{fig:fraud-expected-regret}
+\end{figure}
 
 \subsubsection{Metric Sensitivity and Operational Thresholds}
 In a production setting, the choice of the decision threshold is governed by the relative costs in $\mC$. Standard AUC-PR measures performance across all thresholds equally. However, for fraud detection, we are primarily interested in the "High-Precision" regime (top-left of the PR curve). Our analysis shows that \CACIS{} significantly outperforms baselines in this critical region, allowing merchants to decline more fraud without increasing the friction for legitimate customers. This is quantified by the partial AUC (pAUC) at high precision, where \CACIS{} shows a 12\% relative improvement over standard cross-entropy.
