@@ -68,43 +68,67 @@ logger = logging.getLogger(__name__)
 # Secret resolution
 # =============================================================================
 
+import re
+
+# An env-var name (POSIX-ish): uppercase letters, digits, underscores, leading
+# letter or underscore. Anything not matching this is treated as a literal value.
+_ENV_VAR_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def _resolve_one(spec: str, *, label: str, allow_missing: bool) -> tuple[str, bool]:
+    """
+    Resolve a single credential spec to a (value, was_missing) pair.
+
+    ``spec`` is what the user wrote in the YAML next to e.g. ``vastai_api_key_env``.
+    Two modes are supported transparently:
+
+    - **Env var name** (``[A-Z_][A-Z0-9_]*``): looked up from ``os.environ``.
+      Missing → placeholder when ``allow_missing``, else raise.
+    - **Literal value** (anything else, e.g. an actual key starting with `KGAT_`
+      or a URL): used as-is. This is convenient for one-machine setups where
+      the user already has the value handy.
+    """
+    if _ENV_VAR_RE.match(spec):
+        val = os.environ.get(spec)
+        if val:
+            return val, False
+        if allow_missing:
+            return f"<UNSET:{spec}>", True
+        raise RuntimeError(
+            f"Environment variable '${spec}' is not set "
+            f"({label}). Export it, replace with a literal in cloud-vast.yaml, "
+            f"or use --dry-run."
+        )
+    return spec, False
+
+
 def _resolve_secrets(cfg: VastConfig, *, allow_missing: bool = False) -> Dict[str, str]:
     """
-    Read each ``*_env`` from the shell and return ``{ENV_NAME: VALUE}``.
+    Resolve every credential field in the YAML.
 
-    When ``allow_missing`` is True (used by ``--dry-run``), missing variables
-    are filled with the placeholder ``<UNSET:VARNAME>`` instead of raising. The
-    placeholder is obvious in dry-run output and makes the rest of the
-    rendering path work without real credentials.
+    Returns ``{ENV_NAME: VALUE}`` where ENV_NAME is the canonical name the
+    bootstrap script reads from (e.g. ``VAST_API_KEY``, ``KAGGLE_USERNAME``),
+    regardless of whether the YAML had a literal value or an env-var indirection.
     """
     creds = cfg.credentials
-    needed = {
-        creds.vastai_api_key_env:    "vast.ai API key",
-        creds.kaggle_username_env:   "Kaggle username",
-        creds.kaggle_key_env:        "Kaggle API key",
-        creds.b2_key_id_env:         "Backblaze B2 key id",
-        creds.b2_app_key_env:        "Backblaze B2 app key",
-        creds.cost_matrix_url_env:   "public URL of cost_matrix.pt",
-    }
+    specs = [
+        ("VAST_API_KEY",    creds.vastai_api_key_env,   "vast.ai API key"),
+        ("KAGGLE_USERNAME", creds.kaggle_username_env,  "Kaggle username"),
+        ("KAGGLE_KEY",      creds.kaggle_key_env,       "Kaggle API token"),
+        ("B2_KEY_ID",       creds.b2_key_id_env,        "Backblaze B2 key id"),
+        ("B2_APP_KEY",      creds.b2_app_key_env,       "Backblaze B2 app key"),
+        ("COST_MATRIX_URL", creds.cost_matrix_url_env,  "public URL of cost_matrix.pt"),
+    ]
     resolved: Dict[str, str] = {}
     missing: List[str] = []
-    for env_name, desc in needed.items():
-        val = os.environ.get(env_name)
-        if not val:
-            missing.append(f"  - ${env_name}  ({desc})")
-            resolved[env_name] = f"<UNSET:{env_name}>"
-        else:
-            resolved[env_name] = val
-    if missing and not allow_missing:
-        raise RuntimeError(
-            "The following environment variables are not set:\n"
-            + "\n".join(missing)
-            + "\nExport them in your shell before launching, "
-            + "or use --dry-run to inspect what would be sent."
-        )
+    for canonical, spec, label in specs:
+        val, was_missing = _resolve_one(spec, label=label, allow_missing=allow_missing)
+        resolved[canonical] = val
+        if was_missing:
+            missing.append(f"  - ${spec}  ({label})")
     if missing and allow_missing:
         logger.warning(
-            "%d env var(s) missing — using placeholders for --dry-run:\n%s",
+            "%d credential(s) unresolved — using placeholders for --dry-run:\n%s",
             len(missing), "\n".join(missing),
         )
     return resolved
@@ -118,19 +142,13 @@ def build_instance_env(cfg: VastConfig, secrets: Dict[str, str]) -> Dict[str, st
     """
     Build the env dict shipped into the Vast.ai container.
 
-    The bootstrap script reads from these keys (not the ``*_env`` indirection
-    keys used in the YAML).
+    ``secrets`` already keyed by the canonical names the bootstrap reads from
+    (``VAST_API_KEY``, ``KAGGLE_USERNAME``, …), so the launcher doesn't need to
+    re-translate ``*_env`` indirection here.
     """
-    creds = cfg.credentials
     t = cfg.training
-    env: Dict[str, str] = {
-        # Credentials (resolved from the user's shell)
-        "VAST_API_KEY":     secrets[creds.vastai_api_key_env],
-        "KAGGLE_USERNAME":  secrets[creds.kaggle_username_env],
-        "KAGGLE_KEY":       secrets[creds.kaggle_key_env],
-        "B2_KEY_ID":        secrets[creds.b2_key_id_env],
-        "B2_APP_KEY":       secrets[creds.b2_app_key_env],
-        "COST_MATRIX_URL":  secrets[creds.cost_matrix_url_env],
+    env: Dict[str, str] = dict(secrets)  # VAST_API_KEY, KAGGLE_*, B2_*, COST_MATRIX_URL
+    env.update({
         # Output destination
         "RCLONE_DEST":      f"{cfg.output.rclone_remote.rstrip('/')}/{cfg.run_id}",
         # Run definition
@@ -150,7 +168,7 @@ def build_instance_env(cfg: VastConfig, secrets: Dict[str, str]) -> Dict[str, st
         "EPSILON_MODE":     t.epsilon_mode,
         "EPSILON_SCALE":    repr(t.epsilon_scale),
         "NUM_WORKERS":      str(t.num_workers),
-    }
+    })
     return env
 
 
@@ -275,15 +293,17 @@ def main() -> None:
         logger.info("Dry run — no Vast.ai calls.")
         logger.info("Bootstrap onstart cmd: %s", _ONSTART_CMD)
         logger.info("Environment that would be shipped:")
+        SECRET_KEYS = {"VAST_API_KEY", "KAGGLE_KEY", "B2_APP_KEY"}
         for k, v in env.items():
-            shown = v if k not in (
-                "VAST_API_KEY", "KAGGLE_KEY", "B2_APP_KEY",
-            ) else f"<{len(v)} chars hidden>"
+            if k in SECRET_KEYS and not v.startswith("<UNSET:"):
+                shown = f"<{len(v)} chars hidden>"
+            else:
+                shown = v
             logger.info("  %s = %s", k, shown)
         return
 
     logger.info("Searching for cheapest matching Vast.ai offer ...")
-    offer = find_cheapest_offer(cfg, secrets[cfg.credentials.vastai_api_key_env])
+    offer = find_cheapest_offer(cfg, secrets["VAST_API_KEY"])
     logger.info(
         "Picked offer %s — %s × %d  @  $%.4f/hr  (reliability %.2f)",
         offer.get("id"), offer.get("gpu_name"), offer.get("num_gpus", 1),
@@ -297,7 +317,7 @@ def main() -> None:
         disk_gb=cfg.instance.min_disk_gb,
         env_flag=env_flag,
         onstart_cmd=_ONSTART_CMD,
-        api_key=secrets[cfg.credentials.vastai_api_key_env],
+        api_key=secrets["VAST_API_KEY"],
     )
     instance_id = response.get("new_contract") or response.get("id")
     logger.info("✓ Launched instance id = %s", instance_id)

@@ -43,10 +43,21 @@ pip install --quiet --no-cache-dir kaggle
 # 2. Credentials
 # -----------------------------------------------------------------------------
 mkdir -p "$HOME/.kaggle"
-cat > "$HOME/.kaggle/kaggle.json" <<EOF
+# Kaggle supports two credential formats:
+#   1. Legacy kaggle.json  : {"username": "...", "key": "<random 32 hex>"}
+#   2. Modern access_token : KGAT_<hex>   (single bearer token, no username)
+# Detect by prefix on KAGGLE_KEY.
+if [[ "${KAGGLE_KEY}" == KGAT_* ]]; then
+    printf '%s' "${KAGGLE_KEY}" > "$HOME/.kaggle/access_token"
+    chmod 600 "$HOME/.kaggle/access_token"
+    echo "Kaggle: using modern access_token (KGAT_…)"
+else
+    cat > "$HOME/.kaggle/kaggle.json" <<EOF
 {"username":"${KAGGLE_USERNAME}","key":"${KAGGLE_KEY}"}
 EOF
-chmod 600 "$HOME/.kaggle/kaggle.json"
+    chmod 600 "$HOME/.kaggle/kaggle.json"
+    echo "Kaggle: using legacy kaggle.json (${KAGGLE_USERNAME})"
+fi
 
 mkdir -p "$HOME/.config/rclone"
 cat > "$HOME/.config/rclone/rclone.conf" <<EOF
