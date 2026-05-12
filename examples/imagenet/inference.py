@@ -85,23 +85,37 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
 # =============================================================================
 
 def load_checkpoint_bundle(path: Path) -> Dict:
-    """Load a checkpoint produced by ``examples.imagenet.train.save_checkpoint``."""
-    return torch.load(path, map_location="cpu")
+    """
+    Load a checkpoint produced by ``examples.imagenet.train.save_checkpoint``.
+
+    ``weights_only=False`` because the bundle contains our own ``argparse.Namespace``
+    with ``pathlib.PosixPath`` objects (PyTorch ≥ 2.6 rejects these by default).
+    The file is produced by this repo and trusted; do not load checkpoints from
+    untrusted sources without auditing first.
+    """
+    return torch.load(path, map_location="cpu", weights_only=False)
 
 
 def build_model_from_checkpoint(
-    bundle: Dict, *, arch: Optional[str] = None, device: torch.device
+    bundle: Dict,
+    *,
+    arch: Optional[str] = None,
+    num_classes: Optional[int] = None,
+    device: torch.device,
 ) -> torch.nn.Module:
     """
     Instantiate a ResNet matching the architecture used at training time.
 
     The training script stores its ``argparse.Namespace`` in ``bundle['args']``,
-    so we read ``arch`` from there by default and allow an explicit override.
+    so we read ``arch`` and ``num_classes`` from there by default and allow
+    explicit overrides.
     """
     saved_args = bundle.get("args", {})
     if arch is None:
         arch = saved_args.get("arch", "resnet50")
-    model = build_resnet(arch, num_classes=1000)
+    if num_classes is None:
+        num_classes = int(saved_args.get("num_classes", 1000))
+    model = build_resnet(arch, num_classes=num_classes)
     state_dict = bundle["model"]
     # Strip a possible ``module.`` prefix from DDP-saved checkpoints.
     state_dict = {k.removeprefix("module."): v for k, v in state_dict.items()}
@@ -354,6 +368,8 @@ def parse_args() -> argparse.Namespace:
                    help="Optional cost_matrix.pt bundle for cost-optimal predictions + regret.")
     p.add_argument("--arch", type=str, default=None,
                    help="ResNet variant; defaults to the value stored in the checkpoint.")
+    p.add_argument("--num-classes", type=int, default=None,
+                   help="Output classes; defaults to the value stored in the checkpoint.")
     p.add_argument("--device", type=str, default="auto",
                    choices=["auto", "cpu", "cuda", "mps"])
     p.add_argument("--batch-size", type=int, default=64)
@@ -388,7 +404,9 @@ def main() -> None:
     logger.info("Using device: %s", device)
 
     bundle = load_checkpoint_bundle(args.checkpoint)
-    model = build_model_from_checkpoint(bundle, arch=args.arch, device=device)
+    model = build_model_from_checkpoint(
+        bundle, arch=args.arch, num_classes=args.num_classes, device=device,
+    )
 
     C, class_names = load_cost_matrix(args.cost_matrix, device=device)
     if C is None:

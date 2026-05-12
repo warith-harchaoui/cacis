@@ -2,18 +2,11 @@
 examples.imagenet.cloud.config
 ==============================
 
-Typed loader for ``config/cloud.yaml``.
+Typed loader for ``config/cloud-vast.yaml`` — the Vast.ai launcher's config.
 
-Parses the YAML into nested dataclasses, validates required fields, and surfaces
-descriptive errors. Has only one runtime dependency (PyYAML) — the actual AWS
-launcher imports boto3 lazily.
-
-Usage
------
-::
-
-    from examples.imagenet.cloud.config import CloudConfig
-    cfg = CloudConfig.from_yaml(Path("config/cloud.yaml"))
+We pin to Vast.ai with RTX 4090 24 GB. Secrets are passed as environment
+variable **names** in the YAML, never as values, so the file can live on disk
+without leaking credentials.
 """
 
 from __future__ import annotations
@@ -26,141 +19,154 @@ import yaml
 
 
 def _require(d: Dict[str, Any], key: str, section: str) -> Any:
-    """Fetch ``d[key]``; raise a precise error if missing or empty."""
     if key not in d or d[key] in (None, ""):
-        raise ValueError(f"cloud.yaml: missing required key '{section}.{key}'.")
+        raise ValueError(f"cloud-vast.yaml: missing required key '{section}.{key}'.")
     return d[key]
 
 
 @dataclass
-class AwsConfig:
-    region: str
-    profile: Optional[str] = None
+class CredentialsConfig:
+    """
+    Environment-variable **names** holding the actual secret values.
+
+    Use ``--dry-run`` to render the bootstrap with no Vast.ai calls if you
+    don't yet have the env vars set.
+    """
+    vastai_api_key_env: str = "VASTAI_API_KEY"
+    kaggle_username_env: str = "KAGGLE_USERNAME"
+    kaggle_key_env: str = "KAGGLE_KEY"
+    b2_key_id_env: str = "B2_KEY_ID"
+    b2_app_key_env: str = "B2_APP_KEY"
+    cost_matrix_url_env: str = "COST_MATRIX_URL"
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "AwsConfig":
+    def from_dict(cls, d: Dict[str, Any]) -> "CredentialsConfig":
         return cls(
-            region=_require(d, "region", "aws"),
-            profile=d.get("profile"),
+            vastai_api_key_env=d.get("vastai_api_key_env", cls.vastai_api_key_env),
+            kaggle_username_env=d.get("kaggle_username_env", cls.kaggle_username_env),
+            kaggle_key_env=d.get("kaggle_key_env", cls.kaggle_key_env),
+            b2_key_id_env=d.get("b2_key_id_env", cls.b2_key_id_env),
+            b2_app_key_env=d.get("b2_app_key_env", cls.b2_app_key_env),
+            cost_matrix_url_env=d.get("cost_matrix_url_env", cls.cost_matrix_url_env),
         )
 
 
 @dataclass
 class ContainerConfig:
-    image_uri: str
+    image: str
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ContainerConfig":
-        image_uri = _require(d, "image_uri", "container")
-        if ".dkr.ecr." not in image_uri:
-            # Not strictly required, but ECR is what the launcher's auth step assumes.
+        return cls(image=_require(d, "image", "container"))
+
+
+@dataclass
+class InstanceConfig:
+    """Vast.ai offer criteria."""
+    gpu_name: str = "RTX_4090"
+    num_gpus: int = 1
+    min_disk_gb: int = 250
+    max_price_per_hour: float = 0.50
+    min_reliability: float = 0.95
+    cuda_max_good: float = 12.4
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "InstanceConfig":
+        return cls(
+            gpu_name=d.get("gpu_name", cls.gpu_name),
+            num_gpus=int(d.get("num_gpus", cls.num_gpus)),
+            min_disk_gb=int(d.get("min_disk_gb", cls.min_disk_gb)),
+            max_price_per_hour=float(d.get("max_price_per_hour", cls.max_price_per_hour)),
+            min_reliability=float(d.get("min_reliability", cls.min_reliability)),
+            cuda_max_good=float(d.get("cuda_max_good", cls.cuda_max_good)),
+        )
+
+
+@dataclass
+class OutputConfig:
+    """rclone destination, e.g. ``b2:my-bucket/cacis-imagenet``."""
+    rclone_remote: str
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "OutputConfig":
+        remote = _require(d, "rclone_remote", "output")
+        if ":" not in remote:
             raise ValueError(
-                f"container.image_uri ('{image_uri}') does not look like an ECR URI."
+                f"output.rclone_remote must look like '<remote>:<bucket>/path' (got '{remote}')."
             )
-        return cls(image_uri=image_uri)
-
-
-@dataclass
-class Ec2Config:
-    instance_type: str
-    ami_id: str
-    key_name: str
-    subnet_id: str
-    security_group_ids: List[str]
-    iam_instance_profile: str
-    root_volume_size_gb: int = 200
-    terminate_on_complete: bool = True
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Ec2Config":
-        sgs = _require(d, "security_group_ids", "ec2")
-        if not isinstance(sgs, list) or not sgs:
-            raise ValueError("ec2.security_group_ids must be a non-empty list.")
-        return cls(
-            instance_type=_require(d, "instance_type", "ec2"),
-            ami_id=_require(d, "ami_id", "ec2"),
-            key_name=_require(d, "key_name", "ec2"),
-            subnet_id=_require(d, "subnet_id", "ec2"),
-            security_group_ids=list(sgs),
-            iam_instance_profile=_require(d, "iam_instance_profile", "ec2"),
-            root_volume_size_gb=int(d.get("root_volume_size_gb", 200)),
-            terminate_on_complete=bool(d.get("terminate_on_complete", True)),
-        )
-
-
-@dataclass
-class DataConfig:
-    imagenet_s3: str
-    cost_matrix_s3: str
-    output_s3_prefix: str
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "DataConfig":
-        for key in ("imagenet_s3", "cost_matrix_s3", "output_s3_prefix"):
-            val = _require(d, key, "data")
-            if not str(val).startswith("s3://"):
-                raise ValueError(f"data.{key} must start with s3:// (got '{val}').")
-        return cls(
-            imagenet_s3=d["imagenet_s3"],
-            cost_matrix_s3=d["cost_matrix_s3"],
-            output_s3_prefix=d["output_s3_prefix"],
-        )
+        return cls(rclone_remote=remote)
 
 
 @dataclass
 class TrainingConfig:
-    """
-    Hyperparameters passed verbatim to ``examples.imagenet.train``.
-
-    Anything not listed here can still be added to the YAML — unrecognized
-    keys are forwarded as ``--<key-with-dashes>`` flags.
-    """
-    loss: str = "sinkhorn_envelope"
+    """Hyperparameters shared by every loss run."""
     arch: str = "resnet50"
-    batch_size: int = 64
-    epochs: int = 90
+    num_classes: int = 1000
+    batch_size: int = 32
+    epochs: int = 45
+    warmup_epochs: int = 3
     lr: float = 0.1
-    warmup_epochs: int = 5
     weight_decay: float = 1e-4
     label_smoothing: float = 0.1
     sinkhorn_max_iter: int = 20
     epsilon_mode: str = "offdiag_mean"
     epsilon_scale: float = 1.0
-    num_workers: int = 8
-    resume: bool = False
-    # Anything else — forwarded transparently.
-    extra: Dict[str, Any] = field(default_factory=dict)
+    num_workers: int = 4
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "TrainingConfig":
-        known = {f.name for f in cls.__dataclass_fields__.values() if f.name != "extra"}
-        extra = {k: v for k, v in d.items() if k not in known}
-        kwargs = {k: v for k, v in d.items() if k in known}
-        return cls(extra=extra, **kwargs)
+        defaults = cls()
+        kwargs = {}
+        for f in defaults.__dataclass_fields__:
+            if f in d:
+                kwargs[f] = d[f]
+        return cls(**kwargs)
+
+
+_VALID_LOSSES = {
+    "cross_entropy",
+    "sinkhorn_envelope",
+    "sinkhorn_autodiff",
+    "sinkhorn_pot",
+}
 
 
 @dataclass
-class CloudConfig:
+class VastConfig:
     run_id: str
-    aws: AwsConfig
+    credentials: CredentialsConfig
     container: ContainerConfig
-    ec2: Ec2Config
-    data: DataConfig
+    instance: InstanceConfig
+    output: OutputConfig
+    losses: List[str]
     training: TrainingConfig
+    auto_destroy: bool = True
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "CloudConfig":
+    def from_dict(cls, d: Dict[str, Any]) -> "VastConfig":
+        losses = _require(d, "losses", "(root)")
+        if not isinstance(losses, list) or not losses:
+            raise ValueError("'losses' must be a non-empty list.")
+        unknown = set(losses) - _VALID_LOSSES
+        if unknown:
+            raise ValueError(
+                f"Unknown losses: {sorted(unknown)}. "
+                f"Valid: {sorted(_VALID_LOSSES)}."
+            )
+
         return cls(
             run_id=_require(d, "run_id", "(root)"),
-            aws=AwsConfig.from_dict(_require(d, "aws", "(root)")),
+            credentials=CredentialsConfig.from_dict(d.get("credentials", {})),
             container=ContainerConfig.from_dict(_require(d, "container", "(root)")),
-            ec2=Ec2Config.from_dict(_require(d, "ec2", "(root)")),
-            data=DataConfig.from_dict(_require(d, "data", "(root)")),
+            instance=InstanceConfig.from_dict(d.get("instance", {})),
+            output=OutputConfig.from_dict(_require(d, "output", "(root)")),
+            losses=list(losses),
             training=TrainingConfig.from_dict(d.get("training", {})),
+            auto_destroy=bool(d.get("auto_destroy", True)),
         )
 
     @classmethod
-    def from_yaml(cls, path: Path) -> "CloudConfig":
+    def from_yaml(cls, path: Path) -> "VastConfig":
         with open(path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
         if not isinstance(raw, dict):

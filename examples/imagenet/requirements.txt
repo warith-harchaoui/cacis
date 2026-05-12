@@ -2,3 +2,6 @@
 # already pulls torch, torchvision, numpy, scikit-learn, etc.
 torchvision>=0.18
 fasttext-wheel>=0.9.2
+# Vast.ai cloud launcher
+PyYAML>=6.0
+vastai>=0.2

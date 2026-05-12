@@ -1,0 +1,69 @@
+# =============================================================================
+# config/cloud-vast.yaml.example
+#
+# Template for a Vast.ai run of the ImageNet cost-aware pipeline.
+# Copy to config/cloud-vast.yaml (gitignored) and fill in.
+#
+#   python -m examples.imagenet.cloud.launch_vast --config config/cloud-vast.yaml --dry-run
+#   python -m examples.imagenet.cloud.launch_vast --config config/cloud-vast.yaml
+#
+# Hardware: a single RTX 4090 24 GB on Vast.ai (~$0.35–0.45/hr).
+# Budget: roughly $30–50 per loss × 4 losses sequential on one instance =
+# ~$120–200, leaving headroom for re-runs under a $400 cap.
+# =============================================================================
+
+run_id: cacis-imagenet            # B2 path prefix + Vast.ai instance tag
+
+# Credentials are passed as environment variable names — never put the actual
+# secret in this file. The launcher reads the env var at submit time and ships
+# the value into the instance.
+credentials:
+  vastai_api_key_env: VASTAI_API_KEY    # `pip install vastai && vastai set api-key …`
+  kaggle_username_env: KAGGLE_USERNAME  # from kaggle.json
+  kaggle_key_env: KAGGLE_KEY            # from kaggle.json
+  b2_key_id_env: B2_KEY_ID              # Backblaze B2 application key id
+  b2_app_key_env: B2_APP_KEY            # Backblaze B2 application key
+  cost_matrix_url_env: COST_MATRIX_URL  # public URL to download cost_matrix.pt
+
+# Container image (push once to Docker Hub — see scripts/build_and_push.sh)
+container:
+  image: docker.io/yourname/cacis-imagenet:latest
+
+# Vast.ai instance criteria (matches `vastai search offers` filters)
+instance:
+  gpu_name: RTX_4090
+  num_gpus: 1
+  min_disk_gb: 250          # ImageNet ~150 GB extracted + outputs + slack
+  max_price_per_hour: 0.50  # bid ceiling in USD/hour
+  min_reliability: 0.95     # filter out flaky hosts
+  cuda_max_good: 12.4       # must support our PyTorch CUDA build
+
+# Output destination — rclone B2 remote (10 GB free tier)
+output:
+  rclone_remote: b2:my-cacis-bucket   # format: <remote-name>:<bucket-or-path>
+
+# Losses to run sequentially on this one instance
+losses:
+  - cross_entropy
+  - sinkhorn_envelope
+  - sinkhorn_autodiff
+  - sinkhorn_pot
+
+# Hyperparameters shared by all losses (passed verbatim to examples.imagenet.train)
+training:
+  arch: resnet50
+  num_classes: 1000
+  batch_size: 32              # fits 24 GB at K=1000 with AMP
+  epochs: 45                  # half the standard 90 to fit budget; raise if you want more
+  warmup_epochs: 3
+  lr: 0.1                     # scaled by global_batch / 256 inside train.py
+  weight_decay: 1.0e-4
+  label_smoothing: 0.1
+  sinkhorn_max_iter: 20
+  epsilon_mode: offdiag_mean
+  epsilon_scale: 1.0
+  num_workers: 4
+
+# Auto-destroy the instance when training finishes (saves money).
+# Set false if you want to inspect / debug interactively.
+auto_destroy: true

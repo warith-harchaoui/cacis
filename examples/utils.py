@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -40,17 +40,116 @@ PathLike = Union[str, Path]
 # Graphics / Colors
 # =============================================================================
 
-# Standardized color palette (Apple-style / SF)
+# Standardized color palette — mirrors https://harchaoui.org/warith/colors
+# so every figure in the repo shares one visual vocabulary.
 COLORS = {
-    "red": "#FF3B30",
-    "orange": "#FF9500",
-    "yellow": "#FFCC00",
-    "green": "#28CD41",
-    "blue": "#007AFF",
-    "purple": "#AF52DE",
-    "pink": "#FF2D55",
-    "gray": "#8E8E93",
+    # Base palette
+    "red":       "#FF3B30",
+    "orange":    "#FF9500",
+    "yellow":    "#FFCC00",
+    "green":     "#28CD41",
+    "turquoise": "#79DBDC",
+    "blue":      "#007AFF",
+    "purple":    "#AF52DE",
+    "pink":      "#FF2D55",
+    # Light variants (good for fills, light backgrounds, shaded bands)
+    "light_red":       "#FFD8D6",
+    "light_orange":    "#FFEACC",
+    "light_yellow":    "#FFF5CC",
+    "light_green":     "#D4F5D9",
+    "light_turquoise": "#00FFEF",
+    "light_blue":      "#CCE4FF",
+    "light_purple":    "#EFDCF8",
+    "light_pink":      "#FFD5DD",
+    # Neutrals
+    "black": "#000000",
+    "gray":  "#808080",
+    "brown": "#A52A2A",
+    "white": "#F8F8F8",
 }
+
+
+# =============================================================================
+# Plot style (Montserrat font + rcParams)
+# =============================================================================
+#
+# Every figure in this repo (fraud + ImageNet) uses Montserrat-Regular for
+# typographic consistency.  The TTF file lives in ``assets/fonts/`` and is
+# fetched by ``scripts/download_fonts.sh``.  If the file is missing, we fall
+# back to matplotlib's default sans-serif with a single warning.
+
+_FONT_NAME = "Montserrat"
+_FONT_PATH = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "Montserrat-Regular.ttf"
+
+_STYLE_APPLIED = False  # idempotency flag
+
+
+def setup_plot_style() -> None:
+    """
+    Register Montserrat with matplotlib's font manager and apply repo-wide
+    rcParams. Safe to call many times; only the first call does work.
+
+    Run ``bash scripts/download_fonts.sh`` once if the font file is missing.
+    """
+    global _STYLE_APPLIED
+    if _STYLE_APPLIED:
+        return
+
+    import matplotlib as mpl
+
+    # Headless backend — safe for SSH, CI, cloud workers.
+    mpl.use("Agg")
+
+    family = "sans-serif"
+    if _FONT_PATH.exists():
+        try:
+            from matplotlib import font_manager
+            font_manager.fontManager.addfont(str(_FONT_PATH))
+            family = _FONT_NAME
+        except Exception as exc:  # pragma: no cover — defensive
+            logging.getLogger(__name__).warning(
+                "Could not register Montserrat from %s: %s. Falling back to default sans-serif.",
+                _FONT_PATH, exc,
+            )
+    else:
+        logging.getLogger(__name__).warning(
+            "Montserrat-Regular.ttf not found at %s — using default sans-serif. "
+            "Run: bash scripts/download_fonts.sh",
+            _FONT_PATH,
+        )
+
+    mpl.rcParams.update({
+        # Typography
+        "font.family": family,
+        "font.sans-serif": [_FONT_NAME, "DejaVu Sans", "Arial", "Helvetica", "Liberation Sans"],
+        "mathtext.fontset": "dejavusans",
+        "font.size": 11,
+        "axes.titlesize": 13,
+        "axes.titleweight": "bold",
+        "axes.labelsize": 11,
+        "legend.fontsize": 10,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        # Spines / grid
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": True,
+        "grid.alpha": 0.3,
+        "grid.linestyle": "--",
+        # Output
+        "figure.dpi": 100,
+        "savefig.dpi": 200,
+        "savefig.bbox": "tight",
+        # Lines / markers
+        "lines.linewidth": 2.0,
+        "lines.markersize": 6,
+    })
+    _STYLE_APPLIED = True
+
+
+# Apply on import so any module that imports utils (fraud_detection, plots, …)
+# gets the right font + rcParams without an explicit call.
+setup_plot_style()
 
 
 # =============================================================================
@@ -207,6 +306,24 @@ def smooth_update(prev: Optional[float], x: float, alpha: float) -> float:
 # Plotting
 # =============================================================================
 
+def _direction_suffix(better: Optional[Literal["higher", "lower"]]) -> str:
+    """
+    Return a mathtext-rendered direction indicator for the title.
+
+    >>> _direction_suffix("higher")
+    '  ($\\\\uparrow$ higher is better)'
+    >>> _direction_suffix("lower")
+    '  ($\\\\downarrow$ lower is better)'
+    >>> _direction_suffix(None)
+    ''
+    """
+    if better == "higher":
+        return r"  ($\uparrow$ higher is better)"
+    if better == "lower":
+        return r"  ($\downarrow$ lower is better)"
+    return ""
+
+
 def plot_metric_trajectory(
     *,
     iters: Sequence[int],
@@ -218,17 +335,23 @@ def plot_metric_trajectory(
     y_quantile_max: Optional[float] = 0.98,
 
     baselines: Optional[Dict[str, Sequence[float]]] = None,
+    better: Optional[Literal["higher", "lower"]] = None,
 ) -> None:
     """
     Plot a single metric vs training iterations.
-    
+
     Parameters
     ----------
     baselines:
         Optional dictionary of {label: values} for baseline curves.
+    better:
+        ``"higher"`` or ``"lower"`` appends a ``($\\uparrow$ higher is better)`` /
+        ``($\\downarrow$ lower is better)`` indicator to the title. ``None``
+        leaves the title untouched.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    title = title + _direction_suffix(better)
 
     it = np.asarray(list(iters), dtype=int)
     val = np.asarray(list(values), dtype=float)
@@ -328,7 +451,8 @@ def plot_precision_recall_curve(
         plt.axhline(prevalence, color=COLORS["red"], linestyle="--", label=f"Decline All [{prevalence:.4f}]")
         plt.axhline(0.0, color=COLORS["green"], linestyle="--", label="Approve All [0.0000]")
 
-    plt.title(title)
+    # PR-AUC is always higher-is-better.
+    plt.title(title + _direction_suffix("higher"))
     plt.xlabel("Recall")
     plt.ylabel("Precision")
     plt.ylim(-0.05, 1.05)

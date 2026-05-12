@@ -857,6 +857,7 @@ def train_one(
                 ylabel="Expected Regret",
                 epoch_iters=state.epoch_iters,
                 baselines=baselines,
+                better="lower",
             )
 
         if "train_realized_regret" in state.train_smoothed:
@@ -874,6 +875,7 @@ def train_one(
                 ylabel="Realized Regret",
                 epoch_iters=state.epoch_iters,
                 baselines=baselines_real,
+                better="lower",
             )
 
         if "train_pr_auc" in state.train_smoothed:
@@ -895,7 +897,8 @@ def train_one(
                 ylabel="PR-AUC",
                 epoch_iters=state.epoch_iters,
                 baselines=baselines_pr,
-                y_quantile_max=None
+                y_quantile_max=None,
+                better="higher",
             )
         # Validation (Subset) plots
         if state.val_iters:
@@ -913,7 +916,8 @@ def train_one(
                     ylabel="PR-AUC",
                     epoch_iters=state.epoch_iters,
                     baselines=baselines_val_pr,
-                    y_quantile_max=None
+                    y_quantile_max=None,
+                    better="higher",
                 )
             if "expected_opt_regret" in state.val_points:
                 baselines_val = {}
@@ -930,7 +934,8 @@ def train_one(
                     ylabel="€ regret (expected, optimal action)",
                     epoch_iters=state.epoch_iters,
                     baselines=baselines_val,
-                    y_quantile_max=None
+                    y_quantile_max=None,
+                    better="lower",
                 )
             if "realized_regret" in state.val_points:
                 baselines_val_real = {}
@@ -946,8 +951,9 @@ def train_one(
                     title=f"{loss_name} — Validation realized regret vs iteration",
                     ylabel="€ regret (realized)",
                     epoch_iters=state.epoch_iters,
-                    baselines=baselines_val_real,   
-                    y_quantile_max=None
+                    baselines=baselines_val_real,
+                    y_quantile_max=None,
+                    better="lower",
                 )
 
         # PR curve on full validation

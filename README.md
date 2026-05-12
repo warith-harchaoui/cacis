@@ -29,7 +29,9 @@ This repository implements **Optimal Transport (OT)** based loss functions that 
 - [Documentation & Resources](#-documentation)
 - [Tests](#-tests)
 - [ImageNet with FastText Semantic Cost](#-imagenet-with-fasttext-semantic-cost)
-- [Launching on AWS](#-launching-on-aws)
+- [Figure Style: Montserrat + Shared Palette](#-figure-style-montserrat--shared-palette)
+- [Local Smoke Test (Before You Spend Cloud Money)](#-local-smoke-test-before-you-spend-cloud-money)
+- [Launching on Vast.ai](#️-launching-on-vastai)
 - [Inference](#-inference)
 - [Citation](#-citation)
 - [License](#-license)
@@ -606,36 +608,9 @@ Beyond fraud, the same cost-aware machinery applies to **semantic classification
 
 `offdiag_mean` ε is computed **once** from the shared cost matrix at startup and converted to a constant — avoiding a per-batch reduction over a (B, 1000²) mask.
 
-### Cloud setup (AWS / GCP)
+### Running on the cloud
 
-A self-contained Dockerfile lives at `examples/imagenet/Dockerfile`. The header comments include the exact ECR push, Artifact Registry push, and `docker run` commands for both clouds.
-
-**AWS — single multi-GPU EC2 (e.g. `p4d.24xlarge`):**
-```bash
-docker run --gpus all --shm-size=8g \
-    -v /mnt/imagenet:/data/imagenet:ro \
-    -v /mnt/output:/workspace/imagenet_output \
-    -v /mnt/models:/models:ro \
-    <acct>.dkr.ecr.<region>.amazonaws.com/cacis-imagenet:latest \
-    torchrun --standalone --nproc-per-node=8 \
-      -m examples.imagenet.train \
-        --data-root /data/imagenet \
-        --cost-matrix /models/cost_matrix.pt \
-        --loss sinkhorn_envelope \
-        --batch-size 64 --epochs 90 \
-        --output-dir /workspace/imagenet_output \
-        --run-id resnet50_fasttext
-```
-
-**GCP — single multi-GPU `a2-highgpu-8g`:** same command with the GCP-pushed image and a GCSFuse / persistent-disk mount in place of `/mnt/imagenet`.
-
-**Multi-node** (e.g. two `p4d.24xlarge` for 16 × A100): set `MASTER_ADDR` to the first node's IP and launch on each node with:
-```bash
-torchrun --nnodes=2 --node-rank=$NODE_RANK \
-    --nproc-per-node=8 --rdzv-backend=c10d \
-    --rdzv-endpoint=$MASTER_ADDR:29500 \
-    -m examples.imagenet.train ...
-```
+Cloud is one provider: **Vast.ai on a single RTX 4090 24 GB**. The full step-by-step ([`config/README.md`](config/README.md)) walks through Vast.ai + Kaggle + Backblaze B2 + Docker Hub from zero. See the [Launching on Vast.ai](#️-launching-on-vastai) section below for the short version.
 
 ### Files
 
@@ -645,48 +620,97 @@ torchrun --nnodes=2 --node-rank=$NODE_RANK \
 | `examples/imagenet/classnames.py` | Load ImageNet class labels in the canonical `ImageFolder` order. |
 | `examples/imagenet/data.py` | DDP-aware ImageNet DataLoaders. |
 | `examples/imagenet/model.py` | torchvision ResNet factory (no pretrained weights). |
-| `examples/imagenet/train.py` | DDP + AMP training loop. Reports Top-1, Top-5, and realized semantic regret. |
+| `examples/imagenet/train.py` | Single-GPU + AMP training loop. Reports Top-1, Top-5, and realized semantic regret. |
 | `examples/imagenet/inference.py` | Cost-aware prediction (single image, directory, full val). |
-| `examples/imagenet/Dockerfile` | Container for AWS/GCP GPU instances. |
+| `examples/imagenet/Dockerfile` | Container for Vast.ai (RTX 4090 24 GB). |
 
-## ☁️ Launching on AWS
+## 🎨 Figure Style: Montserrat + Shared Palette
 
-A config-driven launcher provisions a single multi-GPU EC2 instance, stages ImageNet from S3, runs the training container, syncs results back, and self-terminates. No SageMaker abstractions, no shim scripts — just `ec2:RunInstances` with a self-contained user-data bootstrap.
+Every figure in the repo (fraud + ImageNet) uses **Montserrat-Regular** and a single Apple-style color palette (mirror of [harchaoui.org/warith/colors](https://harchaoui.org/warith/colors)). The setup is centralized in `examples/utils.py::setup_plot_style()` and applied at import time, so figures look the same from `examples.fraud_detection`, `examples.imagenet.train`, and the CLI re-plot path.
 
-### 1. Copy the config template
+The font is **not** tracked in git (binaries don't belong there). Fetch it once:
 
 ```bash
-cp config/cloud.yaml.example config/cloud.yaml
-# Fill in: aws.region, container.image_uri, ec2.{ami_id, key_name, subnet_id, security_group_ids, iam_instance_profile}, and the s3 paths.
+bash scripts/download_fonts.sh           # idempotent; skips if already present
+bash scripts/download_fonts.sh --force   # re-download
 ```
 
-The real `config/cloud.yaml` is gitignored. The instance profile referenced under `ec2.iam_instance_profile` must allow ECR pull, S3 r/w on the data and output buckets, and (if `terminate_on_complete: true`) `ec2:TerminateInstances` scoped to the instance.
+If the file is missing at runtime, plots fall back to default sans-serif with a single warning — nothing crashes. The Docker image builds the font into itself automatically, so cloud runs are unaffected.
 
-### 2. Push the Docker image to ECR
+## 🧪 Local Smoke Test (Before You Spend Cloud Money)
 
-See `examples/imagenet/Dockerfile` header comments for the exact ECR commands.
-
-### 3. Launch
+**Always run this before launching on Vast.ai.** It validates the entire pipeline end-to-end on CPU/MPS with real Imagenette images in ~30 seconds, so you find pipeline bugs locally instead of after a remote GPU has been running for an hour.
 
 ```bash
-# Render and print the bootstrap script (no AWS calls):
-python -m examples.imagenet.cloud.launch_ec2 --config config/cloud.yaml --dry-run
+# Default: sinkhorn_envelope on a 10-class, 8/4/4 (train/val/test) synthetic dataset
+python -m examples.imagenet.smoke_test
+
+# Try every loss in sequence
+python -m examples.imagenet.smoke_test --loss all
+
+# Keep the working directory for inspection (default: cleaned up)
+python -m examples.imagenet.smoke_test --keep
+```
+
+The smoke test:
+
+1. Downloads **Imagenette** (10-class ImageNet subset from fast.ai, ~95 MB) to `~/.cache/cacis/` on first run; reuses the cache afterward. Samples 8 train + 4 val + 4 test real JPEGs per class into the workdir.
+2. Builds a synthetic `cost_matrix.pt` (no FastText needed — the smoke test validates the pipeline, not the embedding quality).
+3. Runs `examples.imagenet.train` for 2 epochs of 5 train + 2 val batches on CPU (with `--allow-cpu --no-amp --quick`).
+4. Re-generates the curves from the produced `metrics.jsonl` via `examples.imagenet.plots` — proving each figure is reproducible from data alone.
+5. Runs `examples.imagenet.inference` in all three modes (single image, directory, ImageFolder).
+6. Verifies every required artifact is on disk: `args.json`, `metrics.jsonl`, `metrics.csv`, `checkpoint_last.pt`, `checkpoint_best.pt`, `curve_loss.png`, `curve_accuracy.png`, `curve_regret.png`.
+
+Exit code is 0 on success and non-zero on any failure — safe to wire into CI.
+
+### Reproducing the curves later
+
+Every figure produced by training is re-creatable from `metrics.jsonl` alone:
+
+```bash
+python -m examples.imagenet.plots --run-dir imagenet_output/<run_id>/
+```
+
+This rewrites `curve_loss.png`, `curve_accuracy.png`, `curve_regret.png`, and a spreadsheet-friendly `metrics.csv` from the same JSONL the training loop wrote.
+
+## ☁️ Launching on Vast.ai
+
+A config-driven launcher rents a single Vast.ai instance (default: **RTX 4090 24 GB**), pulls the training container from Docker Hub, downloads ImageNet from Kaggle inside the box, runs every loss sequentially, rclones results to Backblaze B2, and self-terminates. Budget estimate: **~$120–200 total for all four losses** at default settings (45 epochs, batch 32).
+
+The full step-by-step setup (Vast.ai account → Kaggle → B2 → Docker Hub → cost matrix → first launch) lives in [`config/README.md`](config/README.md). Quick summary:
+
+```bash
+# Once: install vastai CLI, set credentials, start a docker daemon, push image, copy template
+pip install vastai
+vastai set api-key <YOUR-KEY>
+
+# macOS daemon (Colima — needed only for building/pushing the image; not at runtime)
+brew install colima docker-buildx
+colima start --cpu 4 --memory 8 --disk 60
+
+cp config/cloud-vast.yaml.example config/cloud-vast.yaml
+# … edit cloud-vast.yaml; export KAGGLE_*, B2_*, VASTAI_API_KEY, COST_MATRIX_URL …
+
+# Dry-run (no Vast.ai calls):
+python -m examples.imagenet.cloud.launch_vast --config config/cloud-vast.yaml --dry-run
 
 # Actually launch:
-python -m examples.imagenet.cloud.launch_ec2 --config config/cloud.yaml
+python -m examples.imagenet.cloud.launch_vast --config config/cloud-vast.yaml
 ```
 
-The script prints the instance id and an `aws ssm start-session` command for attaching. Live logs land in `/var/log/cacis-bootstrap.log` on the instance; the same log is also uploaded to S3 alongside the model outputs.
+The launcher prints the instance id and a one-liner to tail logs (`vastai logs <id> --follow`). Outputs land at `<rclone_remote>/<run_id>/<run_id>-<loss>/` and the instance self-destroys when training finishes.
 
 ### Files
 
 | File | Purpose |
 |------|---------|
-| `config/cloud.yaml.example` | Annotated template — copy to `config/cloud.yaml`. |
-| `examples/imagenet/cloud/config.py` | Typed YAML loader with descriptive errors. |
-| `examples/imagenet/cloud/launch_ec2.py` | Renders user-data and calls `ec2:RunInstances`. CLI + `--dry-run`. |
+| `config/cloud-vast.yaml.example` | Annotated template — copy to `config/cloud-vast.yaml`. |
+| `examples/imagenet/cloud/config.py` | Typed YAML loader. |
+| `examples/imagenet/cloud/launch_vast.py` | Searches the marketplace, creates the instance, ships env vars + bootstrap. |
+| `examples/imagenet/cloud/vast_bootstrap.sh` | Runs inside the container: downloads data, trains, syncs, self-destroys. |
+| `examples/imagenet/Dockerfile` | Builds the image pushed to Docker Hub. |
 
-> **Multi-node clusters** (e.g. 2 × p4d.24xlarge = 16 × A100) are out of scope for this single-instance launcher; for that, AWS ParallelCluster or SageMaker is the right tool. The training script itself is already multi-node-ready under `torchrun` (see `examples/imagenet/train.py` docstring).
+> **Multi-instance / parallel runs:** to run all four losses *in parallel* instead of sequential on one box, launch the script four times with `losses: [<single_loss>]` in four separate config files. Same total cost, ¼ the wall clock.
 
 ## 🔮 Inference
 

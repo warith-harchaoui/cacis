@@ -17,7 +17,7 @@ Pipeline
 3. ``model.py``         — torchvision ResNet (trained from scratch).
 4. ``train.py``         — DDP + AMP training loop; works under ``torchrun``
                           on a single node or many.
-5. ``Dockerfile``       — runtime image for AWS / GCP GPU instances.
+5. ``Dockerfile``       — runtime image for Vast.ai (RTX 4090 24 GB).
 
 See the module docstrings for usage; see the project ``README.md`` for the
 end-to-end cloud workflow.

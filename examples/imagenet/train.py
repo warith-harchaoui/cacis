@@ -27,25 +27,23 @@ Single-node, single-GPU
         --loss sinkhorn_envelope \\
         --batch-size 64 --epochs 90
 
-Single-node, 8 GPUs
--------------------
+Vast.ai (single RTX 4090 24 GB, the supported cloud target)
+-----------------------------------------------------------
 ::
 
-    torchrun --standalone --nproc-per-node=8 \\
+    torchrun --standalone --nproc-per-node=1 \\
         -m examples.imagenet.train \\
-        --data-root /data/imagenet \\
-        --cost-matrix /models/cost_matrix.pt \\
+        --data-root /data/imagefolder \\
+        --cost-matrix /workspace/cost_matrix.pt \\
         --loss sinkhorn_envelope \\
-        --batch-size 64
+        --batch-size 32 --epochs 45
 
-Multi-node (e.g., 2 × 8 GPUs)
------------------------------
-On every node (``NODE_RANK`` set to ``0`` and ``1``)::
+The bootstrap script (``examples/imagenet/cloud/vast_bootstrap.sh``) wraps
+this with credential setup, ImageNet download from Kaggle, rclone upload to
+Backblaze B2, and self-destruction.
 
-    torchrun --nnodes=2 --node-rank=$NODE_RANK \\
-        --nproc-per-node=8 --rdzv-backend=c10d \\
-        --rdzv-endpoint=$MASTER_ADDR:29500 \\
-        -m examples.imagenet.train ...
+DDP scaffolding remains in this script for future multi-GPU runs; it is
+inactive on single-GPU setups.
 
 Author
 ------
@@ -67,7 +65,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
 
@@ -79,6 +77,7 @@ from cost_aware_losses import (
 
 from examples.imagenet.data import build_loaders
 from examples.imagenet.model import build_resnet
+from examples.imagenet.plots import plot_curves
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +243,7 @@ def evaluate(
     *,
     cost_matrix: Optional[torch.Tensor],
     dist_info: DistInfo,
+    max_batches: Optional[int] = None,
 ) -> Dict[str, float]:
     """
     Compute Top-1 / Top-5 accuracy and, when ``cost_matrix`` is provided, the
@@ -260,7 +260,9 @@ def evaluate(
     n_total = n_top1 = n_top5 = 0
     sum_regret = 0.0
 
-    for images, targets in loader:
+    for step, (images, targets) in enumerate(loader):
+        if max_batches is not None and step >= max_batches:
+            break
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         logits = model(images)
@@ -312,6 +314,7 @@ def train_one_epoch(
     log_every: int,
     use_amp: bool,
     cost_matrix: Optional[torch.Tensor],
+    max_batches: Optional[int] = None,
 ) -> Dict[str, float]:
     model.train()
     running_loss = running_top1 = running_top5 = 0.0
@@ -319,11 +322,13 @@ def train_one_epoch(
     t0 = time.time()
 
     for step, (images, targets) in enumerate(loader):
+        if max_batches is not None and step >= max_batches:
+            break
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        with autocast(enabled=use_amp):
+        with autocast(device_type="cuda", enabled=use_amp):
             logits = model(images)
             loss = compute_loss(loss_fn, logits, targets, cost_matrix)
 
@@ -400,8 +405,14 @@ def load_checkpoint(
     scaler: GradScaler,
     device: torch.device,
 ) -> Tuple[int, float]:
-    """Restore state in-place and return ``(next_epoch, best_acc1)``."""
-    ckpt = torch.load(path, map_location=device)
+    """
+    Restore state in-place and return ``(next_epoch, best_acc1)``.
+
+    ``weights_only=False`` because we store our own ``argparse.Namespace``
+    (with ``pathlib.PosixPath``) in the bundle; PyTorch ≥ 2.6 rejects that by
+    default. The file is produced by this script and trusted.
+    """
+    ckpt = torch.load(path, map_location=device, weights_only=False)
     _unwrap(model).load_state_dict(ckpt["model"])
     optimizer.load_state_dict(ckpt["optimizer"])
     scheduler.load_state_dict(ckpt["scheduler"])
@@ -533,6 +544,7 @@ def main() -> None:
         num_workers=args.num_workers,
         image_size=args.image_size,
         distributed=dist_info.is_distributed,
+        pin_memory=(device.type == "cuda"),
     )
 
     # -------------------------
@@ -580,7 +592,7 @@ def main() -> None:
 
     # AMP is CUDA-only; silently disable on CPU/MPS.
     use_amp = (not args.no_amp) and device.type == "cuda"
-    scaler = GradScaler(enabled=use_amp)
+    scaler = GradScaler(device="cuda", enabled=use_amp)
 
     # -------------------------
     # Resume
@@ -588,7 +600,10 @@ def main() -> None:
     ckpt_last = run_dir / "checkpoint_last.pt"
     ckpt_best = run_dir / "checkpoint_best.pt"
     epoch_start = 0
-    best_acc1 = 0.0
+    # ``-inf`` so the first epoch's val_top1 (however small) always wins and
+    # writes a checkpoint_best.pt — even on degenerate smoke runs where every
+    # val_top1 is 0.0. Real runs comfortably beat -inf on epoch 0 too.
+    best_acc1 = float("-inf")
     if args.resume and ckpt_last.exists():
         epoch_start, best_acc1 = load_checkpoint(
             ckpt_last, model=model, optimizer=optimizer,
@@ -635,6 +650,11 @@ def main() -> None:
             row.update({f"val_{k}": v for k, v in val_stats.items()})
             with open(run_dir / "metrics.jsonl", "a") as f:
                 f.write(json.dumps(row) + "\n")
+
+            # Re-render curves from metrics.jsonl after every epoch.
+            # Each figure is fully re-creatable from the on-disk metrics file via
+            #   python -m examples.imagenet.plots --run-dir <run_dir>
+            plot_curves(run_dir / "metrics.jsonl", run_dir)
 
             save_checkpoint(
                 ckpt_last, model=model, optimizer=optimizer,
