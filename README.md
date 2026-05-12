@@ -1,632 +1,339 @@
-# 🚀 Cost-Aware Classification + Fraud Benchmark (IEEE-CIS)
+# CACIS: Cost-Aware Classification with Informative Sinkhorn
 
-**Author:** [Warith Harchaoui, Ph.D.](https://www.linkedin.com/in/warith-harchaoui/)
 
-Corporate research/engineering repository for **cost-aware classification** with **example-dependent misclassification costs**. This toolbox transforms traditional machine learning from "matching labels" to "**maximizing business profit**".
 
-## 🎯 The Business Problem
 
-Traditional classification (Cross-Entropy) treats all errors as equal. In the real world, **some mistakes are far more expensive than others**:
-- **False Decline:** Turning away a legit customer costs the transaction margin + customer frustration + possible churn.
-- **False Approval (Fraud):** Accepting a stolen card costs the full transaction amount + chargeback fees + operational overhead.
+Classifiers deployed in industry trigger downstream actions whose consequences are rarely uniform across error types. Cross-entropy, the de facto training objective, is decision-agnostic: it treats every off-diagonal mistake identically and therefore aligns poorly with the actual quantity practitioners care about — the expected cost incurred by the model's decision.
 
-This repository implements **Optimal Transport (OT)** based loss functions that "understand" these costs during training, allowing models to make decisions that minimize financial regret rather than just counting errors.
+We introduce **CACIS** (*Cost-Aware Classification using Informative Sinkhorn*), a differentiable loss that embeds a task-specific cost matrix into the geometry of the predictive distribution. CACIS uses entropy-regularized Optimal Transport to induce a non-isotropic metric on the label simplex and computes the model-implied distribution through a numerically stable Frank–Wolfe inner loop that does not require unrolling Sinkhorn iterations.
+
+We illustrate the framework on two complementary examples that span the spectrum of ground costs. In **fraud detection** (*IEEE-CIS / Vesta*), the cost matrix is instance-dependent and monetary: each transaction induces its own cost via a value model parameterized by transaction amount, chargeback multiplier, and false-decline friction.
+
+In **image recognition** (*ImageNet-1k with a torchvision ResNet trained from scratch*), the cost matrix is class-shared and semantic: the cost of confusing two classes is the cosine distance between the FastText embeddings of their names, so confusing *tiger* with *leopard* is penalized far less than confusing *tiger* with *minivan*.
+
+The same loss, optimizer, and gradient strategy are used in both regimes; only the cost matrix changes. **CACIS** reduces realized regret relative to cross-entropy and weighted cross-entropy on the fraud benchmark while maintaining calibration, and produces semantically gentler errors on ImageNet at unchanged top-1 accuracy.The result is a single, decoupled recipe for cost-sensitive learning: specify the geometry once via a cost matrix, train as usual.
+
 
 ---
 
 ## 📍 Table of Contents
 
-- [The Business Problem](#-the-business-problem)
-- [Quick Start for Decisions Makers](#-quick-start-for-decisions-makers)
-- [Available Loss Functions](#-available-loss-functions)
-  - [Baseline Losses](#1-baseline-losses)
-  - [Cost-Aware Losses (Optimal Transport)](#2-cost-aware-losses-optimal-transport)
-- [Epsilon (ε) Tuning Guide](#️-epsilon-ε-tuning-guide)
-- [Performance Tips](#-performance-tips)
-- [Complete Usage Guide](#-complete-usage-guide)
-- [Metrics & Evaluation](#-metrics--evaluation)
-- [Choosing a Loss Function](#-choosing-a-loss-function)
-- [Documentation & Resources](#-documentation)
-- [Tests](#-tests)
-- [ImageNet with FastText Semantic Cost](#-imagenet-with-fasttext-semantic-cost)
-- [Figure Style: Montserrat + Shared Palette](#-figure-style-montserrat--shared-palette)
-- [Local Smoke Test (Before You Spend Cloud Money)](#-local-smoke-test-before-you-spend-cloud-money)
-- [Launching on Vast.ai](#️-launching-on-vastai)
+- [Why CACIS?](#-why-cacis)
+- [Two illustrative examples](#-two-illustrative-examples)
+- [Install](#-install)
+- [Quick start](#-quick-start)
+- [The four cost-aware losses](#-the-four-cost-aware-losses)
+- [Example 1 — Fraud detection (IEEE-CIS / Vesta)](#-example-1--fraud-detection-ieee-cis--vesta)
+- [Example 2 — ImageNet with FastText semantic cost](#-example-2--imagenet-with-fasttext-semantic-cost)
 - [Inference](#-inference)
+- [Local smoke test (before any cloud spend)](#-local-smoke-test-before-any-cloud-spend)
+- [Launching on Vast.ai](#-launching-on-vastai)
+- [Figure style: Montserrat + shared palette](#-figure-style-montserrat--shared-palette)
+- [Repository layout](#-repository-layout)
+- [Tests](#-tests)
+- [Docs](#-docs)
 - [Citation](#-citation)
 - [License](#-license)
 
 ---
 
-## 💡 Quick Start for Decisions Makers
+## 🎯 Why CACIS?
 
-If you want to see the business impact immediately, run the comprehensive benchmark:
+Industrial classifiers don't return labels — they trigger **actions** whose consequences are almost never uniform.
+Cross-entropy is decision-agnostic: every off-diagonal error contributes the same gradient.
+**CACIS** replaces the isotropic Shannon/KL geometry of cross-entropy with the non-isotropic geometry
+induced by *entropic optimal transport under a user-supplied cost matrix* $\mathbf C$.
+
+- $\mathbf C_{i,j}$ = cost of predicting $j$ when truth is $i$ (zero on diagonal, non-negative off-diagonal)
+- $\mathbf C$ can be **global** $(K,K)$ shared across the batch — or **instance-dependent** $(B,K,K)$
+- The training loss "sees" the cost geometry directly. No threshold heuristics, no manual reweighting.
+
+Read [`docs/math.md`](docs/math.md) for the derivation; [`docs/latex/`](docs/latex/) holds the KDD paper draft.
+
+---
+
+## 🧭 Two illustrative examples
+
+The framework is **one recipe** — only the cost matrix changes:
+
+| Axis | Example 1 — Fraud detection | Example 2 — ImageNet |
+|------|----------------------------|----------------------|
+| Cost varies with | each instance $\vec x$ (transaction amount) | each class pair $(i,j)$ |
+| $K$ | 2 (approve / decline) | 1000 (WordNet) |
+| $\mathbf C$ source | parametric business value model | cosine distance between FastText embeddings of class names |
+| Units | dollars | dimensionless |
+| Data | 0.5 M tabular transactions | 1.28 M images |
+| Model | MLP / linear | torchvision ResNet from scratch |
+| Compute | a single CPU | one RTX 4090 24 GB on Vast.ai |
+| Where in repo | [`examples/fraud_detection.py`](examples/fraud_detection.py) | [`examples/imagenet/`](examples/imagenet/) |
+
+The same `cost_aware_losses` package powers both. **Practitioners change $\mathbf C$, not the loss.**
+
+---
+
+## 🛠️ Install
 
 ```bash
-# Benchmark all losses against financial baselines
+git clone https://github.com/warith-harchaoui/cost_aware_classification.git cacis
+cd cacis
+
+# Recommended: conda (matches CI)
+conda create -y -n env4cacis python=3.10
+conda activate env4cacis
+pip install -r requirements.txt
+pip install -e .
+
+# One-time: figure font (Montserrat) used by every plot
+bash scripts/download_fonts.sh
+```
+
+To exercise the ImageNet sub-pipeline locally you'll also want `torchvision`, `kaggle`,
+and a few small extras — they live in [`examples/imagenet/requirements.txt`](examples/imagenet/requirements.txt).
+
+---
+
+## ⚡ Quick start
+
+**1. Validate the entire pipeline locally in ~30 s** (no GPU, no AWS, no Kaggle):
+
+```bash
+python -m examples.imagenet.smoke_test --loss all
+```
+
+The smoke test downloads **Imagenette** (10-class ImageNet subset from fast.ai, ~95 MB, cached at `~/.cache/cacis/`),
+trains 2 epochs × 5 train + 2 val batches for **each of the four losses**, regenerates the curves from the
+on-disk `metrics.jsonl`, runs `inference.py` in all three modes, and checks every artifact landed.
+Exit code 0 = green, non-zero = something needs fixing — safe to wire into CI.
+
+**2. Fraud benchmark on your laptop:**
+
+```bash
 python -m examples.fraud_detection --loss all --epochs 15 --run-id business_impact
 ```
 
-**What to look for in results:**
-- **Realized Regret:** The actual money lost in production.
-- **Expected Optimal Regret:** The theoretical minimum loss possible.
-- **Naive Baseline:** What happens if you simply "Approve All" or "Decline All".
+**3. ImageNet on Vast.ai (~$30-50 for all 4 losses):** see [Launching on Vast.ai](#-launching-on-vastai).
 
 ---
 
-## 📋 Available Loss Functions
+## 📋 The four cost-aware losses
 
-### Baseline Losses
+All inherit from [`cost_aware_losses.base.CostAwareLoss`](cost_aware_losses/base.py).
+Same signature, drop-in for `nn.CrossEntropyLoss`:
 
-#### 1. **Cross-Entropy** (`cross_entropy`)
-Standard cross-entropy loss without cost awareness.
-
-**When to use:** Baseline comparison when all misclassifications have equal cost.
-
-**Run command:**
-```bash
-python -m examples.fraud_detection --loss cross_entropy --epochs 5 --run-id baseline
-```
-
-#### 2. **Weighted Cross-Entropy** (`cross_entropy_weighted`)
-Sample-weighted cross-entropy with weights $w_i = C_i[y_i, 1-y_i]$ derived from the cost matrix.
-
-**When to use:** Simple cost-aware baseline that reweights examples by their misclassification cost.
-
-**Run command:**
-```bash
-python -m examples.fraud_detection --loss cross_entropy_weighted --epochs 5 --run-id weighted_baseline
-```
-
-**Additional parameters:**
-- Automatically uses cost matrix to compute sample weights
-- Weights are normalized by median for stability
-
-### Cost-Aware Losses (Optimal Transport)
-
-All OT-based losses use a cost matrix $C$ where $C_{ij}$ represents the cost of predicting class $j$ when the true class is $i$.
-
-#### Understanding Epsilon (ε) Regularization
-
-The entropic regularization parameter ε controls the smoothness of the optimal transport. **By default, ε is computed adaptively from the cost matrix using rule-of-thumb heuristics:**
-
-**Adaptive Epsilon Modes** (recommended):
-- **`offdiag_mean`** (default): ε = mean of off-diagonal costs × scale factor
-- **`offdiag_median`**: ε = median of off-diagonal costs × scale factor  
-- **`offdiag_max`**: ε = maximum off-diagonal cost × scale factor
-
-**Benefits of adaptive ε:**
-- Automatically scales with your cost matrix magnitude
-- No manual tuning required
-- Robust across different problem domains
-- Maintains numerical stability
-
-**Override with constant ε only if:**
-- You have domain expertise suggesting a specific value
-- You're doing controlled experiments comparing different ε values
-- You've validated that a fixed ε outperforms adaptive methods
-
-#### 3. **Sinkhorn-Fenchel-Young Loss** (`sinkhorn_fenchel_young`)
-Implicit Fenchel–Young loss with Frank–Wolfe inner solver. Does not differentiate through the inner optimization.
-
-**Theory:**
-- Uses envelope theorem: computes optimal solution without backpropagating through solver
-- Frank-Wolfe algorithm solves inner QP on the simplex
-- Stable gradients, efficient computation
-
-**When to use:** When you want provably stable gradients from implicit differentiation.
-
-**Run command:**
-```bash
-# Default: adaptive epsilon (offdiag_mean)
-python -m examples.fraud_detection --loss sinkhorn_fenchel_young --epochs 5 --run-id fenchel_young
-```
-
-**Epsilon control options:**
-```bash
-# Use median-based adaptive epsilon (more robust to outliers)
-python -m examples.fraud_detection --loss sinkhorn_fenchel_young --epochs 5 \
-  --epsilon-mode offdiag_median --run-id fy_median
-
-# Use max-based adaptive epsilon (more conservative)
-python -m examples.fraud_detection --loss sinkhorn_fenchel_young --epochs 5 \
-  --epsilon-mode offdiag_max --run-id fy_max
-
-# Scale the adaptive epsilon by 0.5 (tighter regularization)
-python -m examples.fraud_detection --loss sinkhorn_fenchel_young --epochs 5 \
-  --epsilon-scale 0.5 --run-id fy_scale05
-
-# Scale by 2.0 (looser regularization)
-python -m examples.fraud_detection --loss sinkhorn_fenchel_young --epochs 5 \
-  --epsilon-scale 2.0 --run-id fy_scale20
-```
-
-**Advanced: constant epsilon (not recommended unless you know what you're doing):**
-```bash
-# Override with constant epsilon=0.1
-python -m examples.fraud_detection --loss sinkhorn_fenchel_young --epochs 5 \
-  --epsilon 0.1 --run-id fy_constant_eps
-```
-
-**Hyperparameters:**
-- `--epsilon-mode`: Adaptive method - `offdiag_mean` (default), `offdiag_median`, `offdiag_max`
-- `--epsilon-scale`: Multiplicative scale factor for adaptive ε (default: 1.0)
-- `--epsilon`: Fixed ε value (overrides adaptive mode; use sparingly)
-- `--cacis-solver-iter`: Frank-Wolfe iterations (default: 50)
-
-#### 4. **Sinkhorn Envelope Loss** (`sinkhorn_envelope`)
-Entropic OT loss with custom Sinkhorn solver and envelope-style gradients.
-
-**Theory:**
-- Solves entropic OT with custom Sinkhorn iterations
-- Envelope gradient: treats optimal transport plan as constant during backprop
-- Keeps explicit dependence on predictions through KL term
-- Memory efficient, stable gradients
-
-**When to use:** When you want full control over the Sinkhorn implementation with stable gradients.
-
-**Run command:**
-```bash
-# Default: adaptive epsilon
-python -m examples.fraud_detection --loss sinkhorn_envelope --epochs 5 --run-id envelope
-```
-
-**Epsilon control options:**
-```bash
-# Use median-based adaptive epsilon
-python -m examples.fraud_detection --loss sinkhorn_envelope --epochs 5 \
-  --epsilon-mode offdiag_median --run-id env_median
-
-# Tighter regularization via scaling
-python -m examples.fraud_detection --loss sinkhorn_envelope --epochs 5 \
-  --epsilon-scale 0.5 --run-id env_tight
-
-# More Sinkhorn iterations for convergence
-python -m examples.fraud_detection --loss sinkhorn_envelope --epochs 5 \
-  --sinkhorn-max-iter 100 --run-id envelope_iter100
-```
-
-**Hyperparameters:**
-- `--epsilon-mode`: Adaptive method (default: `offdiag_mean`)
-- `--epsilon-scale`: Scale factor for adaptive ε (default: 1.0)
-- `--sinkhorn-max-iter`: Sinkhorn iterations (default: 50)
-
-#### 5. **Sinkhorn Full Autodiff Loss** (`sinkhorn_autodiff`)
-Entropic OT loss with full differentiation through Sinkhorn iterations.
-
-**Theory:**
-- Backpropagates through all Sinkhorn iterations
-- More "end-to-end" but higher memory usage
-- May have less stable gradients for many iterations
-
-**When to use:** When you want to compare end-to-end learning vs envelope gradients, or when iteration count is small.
-
-**Run command:**
-```bash
-# Default: adaptive epsilon
-python -m examples.fraud_detection --loss sinkhorn_autodiff --epochs 5 --run-id autodiff
-```
-
-**Epsilon control options:**
-```bash
-# Median-based epsilon with fewer iterations (saves memory)
-python -m examples.fraud_detection --loss sinkhorn_autodiff --epochs 5 \
-  --epsilon-mode offdiag_median --sinkhorn-max-iter 30 --run-id autodiff_efficient
-```
-
-**Hyperparameters:**
-- `--epsilon-mode`: Adaptive method (default: `offdiag_mean`)
-- `--epsilon-scale`: Scale factor (default: 1.0)
-- `--sinkhorn-max-iter`: Sinkhorn iterations (default: 50, consider reducing for memory)
-
-**Memory considerations:** This loss stores intermediate tensors for backprop. Use fewer iterations if memory is limited.
-
-#### 6. **Sinkhorn POT Loss** (`sinkhorn_pot`)
-Entropic OT loss using the [Python Optimal Transport (POT)](https://pythonot.github.io/) library with envelope gradients.
-
-**Theory:**
-- Uses POT's battle-tested, optimized Sinkhorn implementation
-- Envelope gradients (same as `sinkhorn_envelope`) for stability
-- GPU acceleration via POT's backend
-- Best numerical stability from mature implementation
-
-**When to use:** Production scenarios requiring reliability, or when comparing custom implementations against established library.
-
-**Run command:**
-```bash
-# Default: adaptive epsilon
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 --run-id pot
-```
-
-**Epsilon control options:**
-```bash
-# Use median-based epsilon (recommended for production)
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --epsilon-mode offdiag_median --run-id pot_production
-
-# Conservative regularization with max-based epsilon
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --epsilon-mode offdiag_max --sinkhorn-max-iter 100 --run-id pot_conservative
-
-# Fine-tune with epsilon scaling
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --epsilon-scale 0.8 --run-id pot_tuned
-```
-
-**Hyperparameters:**
-- `--epsilon-mode`: Adaptive method (default: `offdiag_mean`)
-- `--epsilon-scale`: Scale factor (default: 1.0)
-- `--sinkhorn-max-iter`: Maximum Sinkhorn iterations (default: 50)
-
-**Benefits:**
-- Mature, optimized implementation
-- GPU support through POT backends
-- Numerical stability improvements
-- Active maintenance by POT community
-
-## 🎛️ Epsilon (ε) Tuning Guide
-
-### Quick Reference
-
-| Epsilon Mode | When to Use | Characteristics |
-|--------------|-------------|-----------------|
-| `offdiag_mean` ✅ | **Default choice** | Balanced, works well in most cases |
-| `offdiag_median` | Outlier-heavy costs | Robust to extreme cost values |
-| `offdiag_max` | Conservative needs | Ensures all costs are regularized |
-
-### Scaling Strategy
-
-The `--epsilon-scale` parameter multiplies the adaptive ε:
-
-| Scale | Effect | Use When |
-|-------|--------|----------|
-| < 1.0 | Tighter regularization, sharper solutions | Costs have clear structure, want crisp decisions |
-| = 1.0 | **Default**, balanced | Start here |
-| > 1.0 | Looser regularization, smoother solutions | Costs are noisy, want robust solutions |
-
-**Example workflow:**
-```bash
-# 1. Start with default
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 --run-id baseline
-
-# 2. If overfitting, increase scale
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --epsilon-scale 2.0 --run-id smoother
-
-# 3. If underfitting, decrease scale
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --epsilon-scale 0.5 --run-id sharper
-```
-
-### Epsilon Scheduling (Advanced)
-
-For longer training runs, you can use **epsilon scheduling** to automatically adjust epsilon over epochs:
-
-#### Exponential Decay Strategy
-
-Start with high epsilon (smooth, stable) and gradually decrease to low epsilon (sharp, decisive):
-
-```bash
-# Exponential decay: 10× base epsilon at epoch 0 → 0.1× at final epoch
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 10 \
-  --epsilon-schedule exponential_decay --run-id scheduled
-```
-
-**How it works:**
-- **Epoch 0**: ε = 10 × base_epsilon (very smooth OT, stable gradients)
-- **Mid-training**: ε gradually decreases exponentially
-- **Final epoch**: ε = 0.1 × base_epsilon (sharp decisions)
-
-**Customize the schedule:**
-```bash
-# Start at 20× and end at 0.05×
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 10 \
-  --epsilon-schedule exponential_decay \
-  --epsilon-schedule-start-mult 20.0 \
-  --epsilon-schedule-end-mult 0.05 \
-  --run-id custom_schedule
-```
-
-**When to use scheduling:**
-- ✅ Long training runs (>10 epochs)
-- ✅ Want stable early training with sharp final predictions
-- ✅ Dealing with difficult optimization landscapes
-- ❌ Not needed for short experiments (<5 epochs)
-
-**Example output** (10 epochs, default schedule):
-```
-Epoch 0: ε = 15.00 (10.0× base)
-Epoch 1: ε =  8.99 (6.0× base)
-Epoch 2: ε =  5.39 (3.6× base)
-...
-Epoch 9: ε =  0.15 (0.1× base)
-```
-
-**Parameters:**
-- `--epsilon-schedule`: `None` (default) or `exponential_decay`
-- `--epsilon-schedule-start-mult`: Starting multiplier (default: 10.0)
-- `--epsilon-schedule-end-mult`: Ending multiplier (default: 0.1)
-
-## 📊 Metrics & Evaluation
-
-To truly measure business success, we move beyond Accuracy and ROC-AUC:
-
-- **PR-AUC (Precision-Recall Area Under Curve):** Primary classification metric for imbalanced fraud data (**higher is better**).
-- **Luck Baseline:** A horizontal line on the PR curve representing a random classifier (equivalent to fraud prevalence).
-- **Expected Optimal Regret:** The expected business cost incurred if we make the mathematically optimal decision based on our model's predictions (**lower is better**).
-- **Realized Regret:** The actual money lost by following the model's decisions on a test set (**lower is better**). Includes:
-  - Total $ lost to accepted fraud.
-  - Total $ value lost due to false declines.
-- **Naive Baseline:** The smoothed average of the better of two constant strategies: "Approve Everything" ($0 fraud detection, massive fraud losses) or "Decline Everything" ($0 fraud losses, massive lost sales). **Your model must beat this to be useful.**
-
----
-
-## ⚡ Performance Tips
-
-### Robust Data Loading
-We recommend using the Python engine for reading large IEEE-CIS CSV files to avoid `ParserError` issues:
 ```python
-df = pd.read_csv('train_transaction.csv', engine='python')
+from cost_aware_losses import SinkhornEnvelopeLoss
+loss_fn = SinkhornEnvelopeLoss()           # default ε from cost-matrix off-diagonal mean
+loss = loss_fn(logits, targets, C=C)        # C: (K,K) shared, or (B,K,K) per-example
+loss.backward()
 ```
 
-### Numerical Stability
-Fraud datasets often have extreme values. We recommend:
-- **`RobustScaler`**: To handle outliers in transaction amounts.
-- **`CosineAnnealingLR`**: For smoother convergence during training.
-- **Lower Learning Rates**: Starting at `1e-5` often provides more stable gradients for Sinkhorn-based losses.
+| Loss | Gradient | Memory | Stability | Recommended for |
+|------|----------|--------|-----------|-----------------|
+| [`SinkhornFenchelYoungLoss`](cost_aware_losses/sinkhorn_fenchel_young.py) | Fenchel-Young + Frank-Wolfe inner solver | low | high | research, theory |
+| [`SinkhornEnvelopeLoss`](cost_aware_losses/sinkhorn_envelope.py) | envelope (no backprop through Sinkhorn iters) | low | high | **default — production** ⭐ |
+| [`SinkhornFullAutodiffLoss`](cost_aware_losses/sinkhorn_autodiff.py) | full autodiff through Sinkhorn iters | high | medium | research comparison |
+| [`SinkhornPOTLoss`](cost_aware_losses/sinkhorn_pot.py) | envelope, [POT](https://pythonot.github.io/) backend | low | high | when you want POT's solver explicitly |
 
-### Device Selection
+### Epsilon (ε) tuning
 
-**Apple Silicon (M*):**
-```bash
-# CPU is often faster than MPS for POT-based losses
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 --device cpu
+The entropic regularizer ε controls the smoothness of the transport plan. **By default it's data-adaptive:**
 
-# MPS works well for other losses
-python -m examples.fraud_detection --loss sinkhorn_envelope --epochs 5 --device mps
-```
+- `offdiag_mean` *(default)* — ε = mean of off-diagonal $\mathbf C$ entries × `epsilon_scale`
+- `offdiag_median` — robust to outlier costs
+- `offdiag_max` — most conservative
+- `constant` — supply `epsilon=<float>` for controlled experiments
 
-**NVIDIA GPU:**
-```bash
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 --device cuda
-```
+`epsilon_scale` (default 1.0) is a multiplier; tighten with `0.5`, loosen with `2.0`.
 
-### Speed Optimizations
+Optional **exponential-decay schedule** (`--epsilon-schedule exponential_decay`) starts at `10×` ε
+for stable early training and decays to `0.1×` ε for sharp final decisions.
 
-**Faster training (lower accuracy):**
-```bash
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --batch-size 128 --sinkhorn-max-iter 10
-```
+See [`docs/math.md`](docs/math.md) for the formal derivation of ε ↔ POT's `reg`.
 
-**Balanced (recommended):**
-```bash
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --batch-size 256 --sinkhorn-max-iter 20
-```
+---
 
-**Quick testing:**
-```bash
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 2 --quick
-```
+## 💰 Example 1 — Fraud detection (IEEE-CIS / Vesta)
 
-## 🚀 Complete Usage Guide
+**Cost matrix is per-example and monetary.** From the value model in
+[`docs/fraud_business_and_cost_matrix.md`](docs/fraud_business_and_cost_matrix.md):
 
-### Installation
+$$
+\mathbf C_i(\vec x_i) =
+\begin{pmatrix}
+0 & \rho_{\mathrm{FD}}\,M_i\\
+\lambda_{\mathrm{cb}}\,M_i + F_{\mathrm{cb}} & 0
+\end{pmatrix}
+$$
 
-Install conda if you haven't already. See [conda](https://harchaoui.org/warith/4ml) for instructions.
+where $M_i$ is the transaction amount, $\rho_{\mathrm{FD}}$ the false-decline friction (default 0.10),
+$\lambda_{\mathrm{cb}}$ the chargeback multiplier (default 1.5), $F_{\mathrm{cb}}$ the fixed dispute fee (default \$15).
 
 ```bash
-PROJECT=cost_aware_fraud
-GITHUB_OWNER=warith-harchaoui
+# Train all four losses + the two baselines, 15 epochs each
+python -m examples.fraud_detection --loss all --epochs 15 --run-id business_impact
 
-REPOURL=https://github.com/$GITHUB_OWNER/$PROJECT.git
-ENV=env4$PROJECT
-
-git clone $REPOURL
-cd $PROJECT
-conda update -y -n base -c defaults conda
-conda create -y -n $ENV python=3.10
-conda activate $ENV
-conda install -y pip
-pip install -r requirements.txt
+# Or one loss at a time
+python -m examples.fraud_detection --loss sinkhorn_envelope --epochs 5 \
+    --epsilon-mode offdiag_median --run-id env_median
 ```
 
-### Dataset Download
+Outputs land at `fraud_output/<run-id>/<loss>/`: per-epoch metrics CSV, PR curves, regret trajectories,
+and `checkpoint_best.pt` selected by validation `expected_opt_regret`.
 
-Download the IEEE-CIS fraud detection dataset:
+**Metrics that actually matter** (every figure is tagged with `↑ higher is better` or `↓ lower is better`):
+- **Realized regret** (↓) — actual money lost following the model's decisions on holdout
+- **Expected optimal regret** (↓) — theoretical floor under perfect calibration
+- **Naive baseline** — better of "approve all" and "decline all" (the model has to beat this to be worth deploying)
+- **PR-AUC** (↑) — sanity metric for class imbalance
+
+The dataset is the [IEEE-CIS Kaggle competition](https://www.kaggle.com/c/ieee-fraud-detection) (Vesta).
+Download once:
 
 ```bash
-rm -rf ieee-fraud-detection.zip ieee-fraud-detection || true
-mkdir ieee-fraud-detection
-wget -c http://deraison.ai/ai/ieee-fraud-detection.zip
-unzip ieee-fraud-detection.zip -d ieee-fraud-detection
+mkdir ieee-fraud-detection && cd ieee-fraud-detection
+wget -c http://deraison.ai/ai/ieee-fraud-detection.zip && unzip -q ieee-fraud-detection.zip
 ```
 
-### Basic Usage Examples
+---
 
-#### Run a Single Loss
-```bash
-# Train with cross-entropy for 5 epochs
-python -m examples.fraud_detection --loss cross_entropy --epochs 5 --run-id exp1
+## 🖼️ Example 2 — ImageNet with FastText semantic cost
 
-# Train with SinkhornPOTLoss (adaptive epsilon)
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 10 --run-id pot_exp
+**Cost matrix is class-shared and semantic.** For each off-diagonal pair $(i,j)$:
 
-# Train with Fenchel-Young loss
-python -m examples.fraud_detection --loss sinkhorn_fenchel_young --epochs 5 --run-id fy_exp
-```
+$$
+\mathbf C^{\mathrm{sem}}_{ij} = 1 - \cos\bigl(\mathrm{emb}(i), \mathrm{emb}(j)\bigr), \qquad \mathbf C^{\mathrm{sem}}_{ii}=0
+$$
 
-#### Run All Losses (Benchmark)
-```bash
-# Compare all 6 loss functions
-python -m examples.fraud_detection --loss all --epochs 5 --run-id benchmark1
-```
-
-This will train 6 separate models (one per loss) and save results in:
-```
-fraud_output/benchmark1/cross_entropy/
-fraud_output/benchmark1/cross_entropy_weighted/
-fraud_output/benchmark1/sinkhorn_fenchel_young/
-fraud_output/benchmark1/sinkhorn_envelope/
-fraud_output/benchmark1/sinkhorn_autodiff/
-fraud_output/benchmark1/sinkhorn_pot/
-```
-
-### Advanced Options
-
-#### Resume Training
-Continue training from a checkpoint for additional epochs:
-
-```bash
-# Train 5 epochs initially
-python -m examples.fraud_detection --loss all --epochs 5 --run-id longrun
-
-# Continue for 3 MORE epochs (total: 8)
-python -m examples.fraud_detection --loss all --epochs 3 --run-id longrun --resume
-```
-
-#### Model Architecture
-```bash
-# Use linear model instead of MLP
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --backbone linear --run-id linear_model
-
-# Custom MLP architecture
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --backbone mlp --hidden-dims 512,256,128 --dropout 0.2 --run-id deep_mlp
-
-# Disable batch normalization
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --no-batchnorm --run-id no_bn
-```
-
-#### Training Configuration
-```bash
-# Custom batch size and learning rate
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 10 \
-  --batch-size 1024 --lr 5e-4 --run-id custom_training
-
-# Quick test run (few batches per epoch)
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 2 \
-  --quick --run-id quick_test
-
-# Custom train/val split
-python -m examples.fraud_detection --loss all --epochs 5 \
-  --split 0.2 --run-id split20
-```
-
-#### Device Selection
-```bash
-# Force CPU
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --device cpu --run-id cpu_run
-
-# Force CUDA (if available)
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --device cuda --run-id gpu_run
-
-# Use MPS (Apple Silicon)
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --device mps --run-id mps_run
-
-# Auto-detect (default)
-python -m examples.fraud_detection --loss sinkhorn_pot --epochs 5 \
-  --device auto --run-id auto_device
-```
-
-### Output Artifacts
-
-Each run creates a directory `fraud_output/<run-id>/<loss_name>/` with:
-
-```
-checkpoint_last.pt          # Latest checkpoint (for resuming)
-checkpoint_best.pt          # Best checkpoint (by PR-AUC)
-train_smoothed_metrics.csv       # Training metrics (smoothed)
-val_metrics.csv               # Validation metrics over time
-val_precision_recall_curve.png  # PR curve visualization
-val_pr_auc.png                  # PR-AUC vs iteration (the higher, the better)
-val_expected_opt_regret.png     # Expected optimal regret (the lower, the better)
-val_realized_regret.png         # Realized regret (the lower, the better)
-train_expected_opt_regret.png   # Training regret (smoothed, the lower, the better)
-train_realized_regret.png       # Training realized regret (the lower, the better)
-train_pr_auc.png                # Training PR-AUC (smoothed, the higher, the better)
-train_precision_recall_curve.png # Training PR curve
-```
-
-
-## 🎯 Choosing a Loss Function
-
-| Loss | Pros | Cons | Best For |
-|------|------|------|----------|
-| `cross_entropy` | Simple, fast, well-understood | Ignores costs | Baseline comparison |
-| `cross_entropy_weighted` | Simple cost integration | Doesn't optimize transport | Quick cost-aware baseline |
-| `sinkhorn_fenchel_young` | Provably stable gradients | Custom implementation | Research, reproducibility |
-| `sinkhorn_envelope` | Stable, memory efficient | Custom implementation | When memory is limited |
-| `sinkhorn_autodiff` | End-to-end learning | High memory, less stable | Research comparison |
-| `sinkhorn_pot` | Production-ready, optimized | External dependency | **Production deployments** ⭐ |
-
-**Recommendation for production:** Start with `sinkhorn_pot` with default adaptive epsilon (`offdiag_mean`).
-
-**Recommendation for research:** Compare `sinkhorn_envelope`, `sinkhorn_autodiff`, and `sinkhorn_fenchel_young` to understand gradient quality vs computational trade-offs.
-
-## 📚 Documentation & Resources
-
-- [**`docs/math.md`**](docs/math.md) — Mathematical foundations and the explicit mapping between $\varepsilon$ and POT's `reg` parameter.
-- [**`docs/fraud_business_and_cost_matrix.md`**](docs/fraud_business_and_cost_matrix.md) — Business value model and per-example cost matrix construction for fraud detection.
-- [**`examples/sinkhorn_pot_example.py`**](examples/sinkhorn_pot_example.py) — Standalone example demonstrating `SinkhornPOTLoss` usage.
-
-## 🖼️ ImageNet with FastText Semantic Cost
-
-Beyond fraud, the same cost-aware machinery applies to **semantic classification**: a confusion between *tiger* and *leopard* is much less costly than a confusion between *tiger* and *minivan*. The `examples/imagenet/` subpackage trains a torchvision ResNet from scratch on ImageNet-1k with a 1000×1000 cost matrix built from **FastText** class-name embeddings.
+where $\mathrm{emb}(\cdot)$ is the [FastText](https://fasttext.cc/) Common Crawl English model
+applied to each class's WordNet name (compound names tokenized and averaged; subword fallback for OOV tokens).
+A confusion between *tiger* and *leopard* incurs ~0.07; *tiger* vs *minivan* ~1.05.
 
 ### Pipeline
 
-1. **Precompute the cost matrix (once, on a laptop).** Embeds each of the 1000 ImageNet class names with FastText and writes `C[i, j] = 1 − cos(emb_i, emb_j)`.
+1. **Build the cost matrix once** (4 MB output, runs locally — see [`scripts/build_cost_matrix.sh`](scripts/build_cost_matrix.sh)):
    ```bash
-   python -m examples.imagenet.cost_matrix \
-       --data-root /data/imagenet \
-       --fasttext /models/cc.en.300.bin \
-       --out cost_matrix.pt
+   bash scripts/build_cost_matrix.sh --fasttext /path/to/cc.en.300.bin
+   # or auto-download FastText (~4.5 GB) to ~/.cache/cacis/
+   bash scripts/build_cost_matrix.sh --download
    ```
-   The result is a small (~4 MB) `cost_matrix.pt` file mounted into training as a model artifact.
-2. **Train.** DDP-aware, AMP-on, cosine LR with linear warmup.
+   Uses the 1000-class WordNet mapping baked in at [`assets/imagenet/LOC_synset_mapping.txt`](assets/imagenet/LOC_synset_mapping.txt) — no Kaggle download needed for this step.
+
+2. **Train on Vast.ai** (1× RTX 4090 24 GB, ~$30-50 for all four losses sequential):
    ```bash
-   torchrun --standalone --nproc-per-node=8 \
-       -m examples.imagenet.train \
-       --data-root /data/imagenet \
-       --cost-matrix cost_matrix.pt \
-       --loss sinkhorn_envelope \
-       --batch-size 64 --epochs 90
+   python -m examples.imagenet.cloud.launch_vast --config config/cloud-vast.yaml
    ```
+   See the next section for full setup.
 
-### Loss recommendation for K=1000
+### Loss recommendation at K=1000
 
-- **`sinkhorn_envelope`** (default) — GPU-native, memory-efficient envelope gradient. **Recommended for ImageNet.**
-- **`sinkhorn_autodiff`** — only for ablation; memory cost scales with `sinkhorn-max-iter`.
-- **`sinkhorn_pot`** — slow at K=1000 because POT's solver runs per example. Reserve for K ≲ 100.
+- ✅ **`sinkhorn_envelope`** — fits 24 GB at batch 32; the default.
+- ✅ `cross_entropy` — baseline for regret-vs-CE comparison.
+- ⚠️ `sinkhorn_autodiff` — memory-sensitive; reduce `sinkhorn_max_iter` to 10.
+- ⚠️ `sinkhorn_pot` — slow at K=1000 because POT solves per example.
 
-`offdiag_mean` ε is computed **once** from the shared cost matrix at startup and converted to a constant — avoiding a per-batch reduction over a (B, 1000²) mask.
+The adaptive ε statistic is **precomputed once at startup** from the shared cost matrix and passed as `epsilon_mode='constant'` to the loss — avoiding a per-batch reduction over a $(B,1000^2)$ mask.
 
-### Running on the cloud
+---
 
-Cloud is one provider: **Vast.ai on a single RTX 4090 24 GB**. The full step-by-step ([`config/README.md`](config/README.md)) walks through Vast.ai + Kaggle + Backblaze B2 + Docker Hub from zero. See the [Launching on Vast.ai](#️-launching-on-vastai) section below for the short version.
+## 🔮 Inference
 
-### Files
+[`examples/imagenet/inference.py`](examples/imagenet/inference.py) loads a checkpoint and supports three modes. When a cost matrix is supplied it reports **both** the standard `argmax` prediction *and* the **cost-optimal action**:
 
-| File | Purpose |
-|------|---------|
-| `examples/imagenet/cost_matrix.py` | Build `C` from FastText (`.bin` or `.vec`). CLI. |
-| `examples/imagenet/classnames.py` | Load ImageNet class labels in the canonical `ImageFolder` order. |
-| `examples/imagenet/data.py` | DDP-aware ImageNet DataLoaders. |
-| `examples/imagenet/model.py` | torchvision ResNet factory (no pretrained weights). |
-| `examples/imagenet/train.py` | Single-GPU + AMP training loop. Reports Top-1, Top-5, and realized semantic regret. |
-| `examples/imagenet/inference.py` | Cost-aware prediction (single image, directory, full val). |
-| `examples/imagenet/Dockerfile` | Container for Vast.ai (RTX 4090 24 GB). |
+$$
+\hat a(\vec p) = \arg\min_a\; \langle \vec p, \mathbf C_{:,a}\rangle
+$$
 
-## 🎨 Figure Style: Montserrat + Shared Palette
+```bash
+# Single image: top-5 + cost-optimal label
+python -m examples.imagenet.inference \
+    --checkpoint imagenet_output/<run>/checkpoint_best.pt \
+    --cost-matrix cost_matrix.pt \
+    --image /path/to/photo.jpg --topk 5
 
-Every figure in the repo (fraud + ImageNet) uses **Montserrat-Regular** and a single Apple-style color palette (mirror of [harchaoui.org/warith/colors](https://harchaoui.org/warith/colors)). The setup is centralized in `examples/utils.py::setup_plot_style()` and applied at import time, so figures look the same from `examples.fraud_detection`, `examples.imagenet.train`, and the CLI re-plot path.
+# Directory → predictions.csv
+python -m examples.imagenet.inference \
+    --checkpoint .../checkpoint_best.pt --cost-matrix cost_matrix.pt \
+    --input-dir /path/to/photos/ --output predictions.csv
+
+# ImageFolder val set: Top-1, Top-5, realized regret under BOTH decision rules
+python -m examples.imagenet.inference \
+    --checkpoint .../checkpoint_best.pt --cost-matrix cost_matrix.pt \
+    --val-dir /data/imagenet/val
+```
+
+The full-validation mode doubles as a regret-vs-argmax ablation.
+
+---
+
+## 🧪 Local smoke test (before any cloud spend)
+
+**Always run this first.** Validates the *entire* pipeline on real images in ~30 s — no GPU required.
+
+```bash
+python -m examples.imagenet.smoke_test                # default loss (sinkhorn_envelope)
+python -m examples.imagenet.smoke_test --loss all     # all four
+python -m examples.imagenet.smoke_test --keep         # preserve the workdir for inspection
+```
+
+The smoke test:
+
+1. Downloads **Imagenette** (10-class ImageNet subset from fast.ai, ~95 MB, cached at `~/.cache/cacis/`) on first run.
+2. Samples 8 train + 4 val + 4 test real JPEGs per class into a temporary `ImageFolder` layout.
+3. Builds a synthetic random (10, 10) cost matrix (smoke test validates the *pipeline*, not the embeddings).
+4. Trains 2 epochs × 5 train + 2 val batches on CPU/MPS with the requested loss(es).
+5. **Re-renders the curves from the on-disk `metrics.jsonl`** via `examples.imagenet.plots` — proving each figure is reproducible from data alone.
+6. Runs `inference.py` in all three modes against the synthetic test split.
+7. Verifies every required artifact landed (`args.json`, `metrics.jsonl`, `metrics.csv`, both checkpoints, three curve PNGs, `predictions.csv`).
+
+Exit code 0 on success; non-zero on any failure (CI-safe).
+
+### Regenerating curves later
+
+Every figure is re-creatable from `metrics.jsonl` alone:
+
+```bash
+python -m examples.imagenet.plots --run-dir imagenet_output/<run-id>/
+```
+
+Rewrites `curve_loss.png`, `curve_accuracy.png`, `curve_regret.png`, and `metrics.csv` from the JSONL.
+
+---
+
+## ☁️ Launching on Vast.ai
+
+One Vast.ai instance (RTX 4090 24 GB, ~$0.30-0.45/hr), four losses sequential, ImageNet pulled from Kaggle inside the box, outputs rclone'd to Backblaze B2, self-destroys when done.
+
+**Estimated total: ~$30-50 for all four losses** at default settings (45 epochs, batch 32). Full ResNet-50 × 90 epochs comes in around $120-200.
+
+The full beginner walkthrough lives in [**`config/README.md`**](config/README.md) (Vast.ai signup → Kaggle → B2 → Docker Hub → cost matrix → first launch). Short version:
+
+```bash
+# Once: install vastai CLI, start a local docker daemon (Colima), copy the template
+pip install vastai PyYAML
+vastai set api-key <YOUR-KEY>
+
+brew install colima docker-buildx   # macOS daemon for building the image
+colima start --cpu 4 --memory 8 --disk 60
+
+cp config/cloud-vast.yaml.example config/cloud-vast.yaml
+# edit cloud-vast.yaml — credentials accept env-var NAMES or literal values
+
+# Dry-run (no Vast.ai calls)
+python -m examples.imagenet.cloud.launch_vast --config config/cloud-vast.yaml --dry-run
+
+# Actually launch
+python -m examples.imagenet.cloud.launch_vast --config config/cloud-vast.yaml
+```
+
+The launcher prints the instance id and a `vastai logs <id> --follow` command. Outputs appear under `<rclone_remote>/<run_id>/<run_id>-<loss>/` as each loss finishes, and the instance self-terminates when training completes.
+
+For all four losses in **parallel** (¼ the wall clock, same total cost), launch the script four times with `losses: [<single_loss>]` in four separate config files.
+
+---
+
+## 🎨 Figure style: Montserrat + shared palette
+
+Every figure in the repo — fraud + ImageNet, training curves + PR curves — uses **Montserrat-Regular** and a single Apple-style palette mirroring [harchaoui.org/warith/colors](https://harchaoui.org/warith/colors). The setup is centralized in `examples/utils.py::setup_plot_style()` and applied at import time.
 
 The font is **not** tracked in git (binaries don't belong there). Fetch it once:
 
@@ -635,186 +342,126 @@ bash scripts/download_fonts.sh           # idempotent; skips if already present
 bash scripts/download_fonts.sh --force   # re-download
 ```
 
-If the file is missing at runtime, plots fall back to default sans-serif with a single warning — nothing crashes. The Docker image builds the font into itself automatically, so cloud runs are unaffected.
+If the file is missing at runtime, plots fall back to default sans-serif with a single warning — nothing crashes. The Docker image builds the font into itself, so cloud runs are unaffected.
 
-## 🧪 Local Smoke Test (Before You Spend Cloud Money)
+Every figure title carries an explicit direction indicator: `↑ higher is better` or `↓ lower is better`.
 
-**Always run this before launching on Vast.ai.** It validates the entire pipeline end-to-end on CPU/MPS with real Imagenette images in ~30 seconds, so you find pipeline bugs locally instead of after a remote GPU has been running for an hour.
+---
 
-```bash
-# Default: sinkhorn_envelope on a 10-class, 8/4/4 (train/val/test) synthetic dataset
-python -m examples.imagenet.smoke_test
+## 🗂️ Repository layout
 
-# Try every loss in sequence
-python -m examples.imagenet.smoke_test --loss all
+```
+cost_aware_losses/                Core library — 4 losses + shared base class
+├── base.py                       CostAwareLoss ABC, cost-matrix handling, ε computation
+├── sinkhorn_fenchel_young.py     Fenchel-Young loss + Frank-Wolfe inner solver
+├── sinkhorn_envelope.py          Custom Sinkhorn with envelope gradient (recommended)
+├── sinkhorn_autodiff.py          Custom Sinkhorn with full autodiff
+└── sinkhorn_pot.py               POT library backend with envelope gradient
 
-# Keep the working directory for inspection (default: cleaned up)
-python -m examples.imagenet.smoke_test --keep
+examples/
+├── fraud_detection.py            IEEE-CIS / Vesta benchmark runner
+├── tabular_models.py             Linear / MLP backbones for fraud
+├── utils.py                      Plot style (Montserrat, palette), TrainingState, plotting helpers
+├── harvest_results.py            Collect summary.csv across fraud runs → LaTeX table
+└── imagenet/
+    ├── cost_matrix.py            FastText cost-matrix builder (CLI)
+    ├── classnames.py             ImageNet class-name loader
+    ├── data.py                   DDP-aware ImageNet loaders
+    ├── model.py                  torchvision ResNet factory (from scratch)
+    ├── train.py                  Single-GPU + AMP training, resumable, with --quick smoke mode
+    ├── inference.py              argmax + cost-optimal prediction, three CLI modes
+    ├── plots.py                  Curves from metrics.jsonl, re-runnable post-hoc
+    ├── smoke_test.py             ~30 s end-to-end pipeline validation
+    ├── Dockerfile                Image pushed to Docker Hub for Vast.ai
+    ├── requirements.txt          ImageNet-specific extras
+    └── cloud/
+        ├── config.py             Typed loader for cloud-vast.yaml
+        ├── launch_vast.py        Searches cheapest offer, creates instance, ships env + bootstrap
+        └── vast_bootstrap.sh     Runs in the container: Kaggle → train loop → rclone → self-destroy
+
+config/
+├── README.md                     Step-by-step Vast.ai setup (start here for cloud)
+├── cloud-vast.yaml.example       Annotated template; copy to cloud-vast.yaml (gitignored)
+
+scripts/
+├── build_cost_matrix.sh          Wraps cost_matrix.py with auto-FastText-locate / --download
+└── download_fonts.sh             Fetch Montserrat-Regular.ttf into assets/fonts/
+
+assets/
+├── imagenet/LOC_synset_mapping.txt   1000-class WordNet mapping, baked in
+└── fonts/                            Montserrat-Regular.ttf (gitignored, fetched once)
+
+docs/
+├── math.md                       Mathematical foundations (ε ↔ POT reg, Sinkhorn, FY)
+├── fraud_business_and_cost_matrix.md   Value model → regret matrix derivation
+└── latex/                        KDD paper draft (anonymous version)
+
+tests/
+├── test_sinkhorn_consistency.py  Cross-implementation loss + gradient equivalence
+└── test_sinkhorn_advanced.py     gradcheck, ε→0 limit, extreme costs, shift invariance
 ```
 
-The smoke test:
+---
 
-1. Downloads **Imagenette** (10-class ImageNet subset from fast.ai, ~95 MB) to `~/.cache/cacis/` on first run; reuses the cache afterward. Samples 8 train + 4 val + 4 test real JPEGs per class into the workdir.
-2. Builds a synthetic `cost_matrix.pt` (no FastText needed — the smoke test validates the pipeline, not the embedding quality).
-3. Runs `examples.imagenet.train` for 2 epochs of 5 train + 2 val batches on CPU (with `--allow-cpu --no-amp --quick`).
-4. Re-generates the curves from the produced `metrics.jsonl` via `examples.imagenet.plots` — proving each figure is reproducible from data alone.
-5. Runs `examples.imagenet.inference` in all three modes (single image, directory, ImageFolder).
-6. Verifies every required artifact is on disk: `args.json`, `metrics.jsonl`, `metrics.csv`, `checkpoint_last.pt`, `checkpoint_best.pt`, `curve_loss.png`, `curve_accuracy.png`, `curve_regret.png`.
-
-Exit code is 0 on success and non-zero on any failure — safe to wire into CI.
-
-### Reproducing the curves later
-
-Every figure produced by training is re-creatable from `metrics.jsonl` alone:
+## 🔬 Tests
 
 ```bash
-python -m examples.imagenet.plots --run-dir imagenet_output/<run_id>/
-```
-
-This rewrites `curve_loss.png`, `curve_accuracy.png`, `curve_regret.png`, and a spreadsheet-friendly `metrics.csv` from the same JSONL the training loop wrote.
-
-## ☁️ Launching on Vast.ai
-
-A config-driven launcher rents a single Vast.ai instance (default: **RTX 4090 24 GB**), pulls the training container from Docker Hub, downloads ImageNet from Kaggle inside the box, runs every loss sequentially, rclones results to Backblaze B2, and self-terminates. Budget estimate: **~$120–200 total for all four losses** at default settings (45 epochs, batch 32).
-
-The full step-by-step setup (Vast.ai account → Kaggle → B2 → Docker Hub → cost matrix → first launch) lives in [`config/README.md`](config/README.md). Quick summary:
-
-```bash
-# Once: install vastai CLI, set credentials, start a docker daemon, push image, copy template
-pip install vastai
-vastai set api-key <YOUR-KEY>
-
-# macOS daemon (Colima — needed only for building/pushing the image; not at runtime)
-brew install colima docker-buildx
-colima start --cpu 4 --memory 8 --disk 60
-
-cp config/cloud-vast.yaml.example config/cloud-vast.yaml
-# … edit cloud-vast.yaml; export KAGGLE_*, B2_*, VASTAI_API_KEY, COST_MATRIX_URL …
-
-# Dry-run (no Vast.ai calls):
-python -m examples.imagenet.cloud.launch_vast --config config/cloud-vast.yaml --dry-run
-
-# Actually launch:
-python -m examples.imagenet.cloud.launch_vast --config config/cloud-vast.yaml
-```
-
-The launcher prints the instance id and a one-liner to tail logs (`vastai logs <id> --follow`). Outputs land at `<rclone_remote>/<run_id>/<run_id>-<loss>/` and the instance self-destroys when training finishes.
-
-### Files
-
-| File | Purpose |
-|------|---------|
-| `config/cloud-vast.yaml.example` | Annotated template — copy to `config/cloud-vast.yaml`. |
-| `examples/imagenet/cloud/config.py` | Typed YAML loader. |
-| `examples/imagenet/cloud/launch_vast.py` | Searches the marketplace, creates the instance, ships env vars + bootstrap. |
-| `examples/imagenet/cloud/vast_bootstrap.sh` | Runs inside the container: downloads data, trains, syncs, self-destroys. |
-| `examples/imagenet/Dockerfile` | Builds the image pushed to Docker Hub. |
-
-> **Multi-instance / parallel runs:** to run all four losses *in parallel* instead of sequential on one box, launch the script four times with `losses: [<single_loss>]` in four separate config files. Same total cost, ¼ the wall clock.
-
-## 🔮 Inference
-
-`examples/imagenet/inference.py` loads a trained checkpoint and supports three modes. When a cost matrix is provided, it reports **both** the standard `argmax` prediction and the **cost-optimal action** under expected-regret minimization.
-
-```bash
-# Single image: top-5 + cost-optimal action label
-python -m examples.imagenet.inference \
-    --checkpoint imagenet_output/resnet50_fasttext/checkpoint_best.pt \
-    --cost-matrix cost_matrix.pt \
-    --image /path/to/photo.jpg --topk 5
-
-# Directory of images → predictions.csv
-python -m examples.imagenet.inference \
-    --checkpoint .../checkpoint_best.pt \
-    --cost-matrix cost_matrix.pt \
-    --input-dir /path/to/photos/ \
-    --output predictions.csv
-
-# ImageFolder val set: Top-1, Top-5, and realized regret under both rules
-python -m examples.imagenet.inference \
-    --checkpoint .../checkpoint_best.pt \
-    --cost-matrix cost_matrix.pt \
-    --val-dir /data/imagenet/val
-```
-
-The full-validation mode also serves as a regret-vs-argmax ablation: it reports realized regret under the standard top-1 rule and under cost-optimal decisions, side by side.
-
-## ✍️ Citation
-
-If you use this work in your research, please cite:
-
-```bibtex
-@inproceedings{harchaoui2026cacis,
-  title={Cost-Aware Classification with Optimal Transport for E-commerce Fraud Detection},
-  author={Harchaoui, Warith and Pantanacce, Laurent},
-  booktitle={The 32nd ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD '26)},
-  year={2026}
-}
-```
-
-## 🔬 Example: Comprehensive Benchmark
-
-```bash
-# Benchmark all losses with optimized settings
-python -m examples.fraud_detection \
-  --loss all \
-  --epochs 15 \
-  --run-id comprehensive_benchmark
-
-# Results will be in fraud_output/comprehensive_benchmark/<loss_name>/
-```
-
-Compare results by examining:
-1. **PR-AUC**: Which loss achieves highest precision-recall?
-2. **Regret metrics**: Which loss minimizes business costs?
-3. **Training curves**: Which loss converges fastest/most stably?
-4. **Computation time**: Which loss is most efficient?
-
-## 🧪 Tests
-
-To ensure the reliability and mathematical correctness of the custom Sinkhorn loss implementations, we provide a comprehensive test suite.
-
-### 1. Installation for Testing
-Tests require the package to be installed in **editable mode** so that `cost_aware_losses` is importable by `pytest`:
-
-```bash
-pip install -e .
-```
-
-### 2. Running Tests
-
-Run the full suite with:
-
-```bash
+pip install -e .   # if not already done
 pytest tests
 ```
 
-### 3. Test Categories
+The suite includes:
 
-- **Consistency Tests** (`tests/test_sinkhorn_consistency.py`):
-  - Verifies that different implementations (`SinkhornPOTLoss`, `SinkhornEnvelopeLoss`, `SinkhornFullAutodiffLoss`) output consistent loss values for the same inputs.
-  - Checks that gradients match across implementations (e.g., confirming that the envelope gradient graft matches the autodiff gradient).
+- **Consistency** — `SinkhornPOTLoss`, `SinkhornEnvelopeLoss`, `SinkhornFullAutodiffLoss` must produce matching loss values and gradients on the same inputs (with documented tolerances for full-autodiff vs envelope).
+- **`gradcheck`** — `torch.autograd.gradcheck` with finite differences mathematically proves the analytical "gradient grafting" used in `SinkhornPOTLoss` / `SinkhornEnvelopeLoss`.
+- **ε → 0 limit** — Sinkhorn cost converges to exact Earth Mover's Distance as ε shrinks.
+- **Extreme costs** — no `NaN` / `Inf` outputs at $\mathbf C$ values up to $10^5$.
+- **Cost-shift invariance** — adding a constant $k$ to $\mathbf C$ raises the loss by exactly $k$ and leaves gradients invariant.
 
-- **Advanced Verification** (`tests/test_sinkhorn_advanced.py`):
-  - **`test_gradcheck`**: Uses `torch.autograd.gradcheck` (finite differences) to mathematically prove the correctness of our custom backward passes. This is critical for confirming the "Gradient Grafting" technique used in `SinkhornPOTLoss` and `SinkhornEnvelopeLoss` (fixing the zero-gradient issue of standard envelope theorems on discrete measures).
-  - **`test_epsilon_limit_convergence`**: Verifies that as entropic regularization $\varepsilon \to 0$, the Sinkhorn loss converges to the exact Optimal Transport cost (Earth Mover's Distance).
-  - **`test_extreme_costs`**: Checks numerical stability with very large cost values (e.g., $10^5$), ensuring no `NaN` or `Inf` outputs.
-  - **`test_cost_shift_invariance`**: Verifies theoretical properties, such as the loss increasing by exactly $k$ when a constant $k$ is added to the cost matrix, while gradients remain invariant.
+Plus the end-to-end smoke test (`python -m examples.imagenet.smoke_test --loss all`) covers the full pipeline including the cloud-launcher's config loader and the inference CLI.
+
+---
+
+## 📚 Docs
+
+- [**`docs/math.md`**](docs/math.md) — Mathematical foundations: entropic OT, Sinkhorn iterations, Fenchel-Young framework, ε ↔ POT.reg mapping, adaptive-ε heuristics.
+- [**`docs/fraud_business_and_cost_matrix.md`**](docs/fraud_business_and_cost_matrix.md) — "Geometry of regret" derivation for IEEE-CIS: value matrix → cost matrix, choice of $\rho_{\mathrm{FD}}, \lambda_{\mathrm{cb}}, F_{\mathrm{cb}}$.
+- [**`docs/latex/`**](docs/latex/) — KDD '26 ADS paper draft (anonymized for review).
+- [**`config/README.md`**](config/README.md) — 10-step Vast.ai walkthrough from zero.
+
+---
+
+## ✍️ Citation
+
+```bibtex
+@inproceedings{harchaoui2026cacis,
+  title     = {Cost-Aware Classification: Putting Geometry into Label Distributions
+               for Fraud Detection and Image Recognition},
+  author    = {Harchaoui, Warith and Pantanacce, Laurent},
+  booktitle = {The 32nd ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD '26)},
+  year      = {2026},
+  publisher = {ACM},
+  address   = {Paris, France}
+}
+```
+
+---
 
 ## 📜 License
 
-**Unlicense** — This is free and unencumbered software released into the public domain.  
+**Unlicense** — free and unencumbered software released into the public domain.
 See [UNLICENSE](https://unlicense.org) for details.
 
 ## 🙏 Acknowledgments
 
-For the resources and the libraries used:
+- [Python Optimal Transport (POT)](https://pythonot.github.io/) — Cuturi-era Sinkhorn implementation we wrap.
+- [fast.ai Imagenette](https://github.com/fastai/imagenette) — the 10-class ImageNet subset used by the smoke test.
+- [Vesta / IEEE-CIS Kaggle competition](https://www.kaggle.com/c/ieee-fraud-detection) — the fraud benchmark dataset.
+- [FastText](https://fasttext.cc/) — the embedding model behind the ImageNet semantic cost matrix.
 
-- [POT - Python Optimal Transport library](https://pythonot.github.io/)
-- [IEEE-CIS Kaggle competition](https://www.kaggle.com/c/ieee-fraud-detection)
-- [ImageNet Kaggle dataset](https://www.kaggle.com/c/imagenet-object-localization-challenge/data)
-- [FastText](https://fasttext.cc/)
+And for the fruitful discussions that made this work possible:
 
-and for fruitful discussions that made this work possible:
+
+
 - [Bachir Zerroug](https://www.linkedin.com/in/bachirzerroug/)
 - [Edmond Jacoupeau](https://www.linkedin.com/in/edmond-jacoupeau/)
