@@ -24,6 +24,11 @@ credentials:
   b2_key_id_env: B2_KEY_ID              # Backblaze B2 application key id
   b2_app_key_env: B2_APP_KEY            # Backblaze B2 application key
   cost_matrix_url_env: COST_MATRIX_URL  # public URL to download cost_matrix.pt
+  # Optional: fast mirror of the ImageNet zip. If set, the bootstrap curls
+  # from here instead of going through Kaggle (which is heavily throttled).
+  # Leave blank to fall back to Kaggle (slow + flaky). Use scripts/
+  # resize_imagenet_for_cloud.py first to make a small (~30 GB) variant.
+  imagenet_zip_url_env: ""              # e.g. https://deraison.ai/ai/imagenet-resized-256.zip
 
 # Container image (push once to Docker Hub — see scripts/build_and_push.sh)
 container:

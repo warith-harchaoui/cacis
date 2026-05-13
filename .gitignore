@@ -244,5 +244,10 @@ config/*.local.yaml
 assets/fonts/*.ttf
 assets/fonts/*.otf
 
+# Credentials — never commit these even if a user drops them in the repo root
+kaggle.json
+*.kaggle.json
+.kaggle/
+
 
 

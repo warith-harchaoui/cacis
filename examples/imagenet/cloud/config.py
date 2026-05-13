@@ -27,7 +27,9 @@ def _require(d: Dict[str, Any], key: str, section: str) -> Any:
 @dataclass
 class CredentialsConfig:
     """
-    Environment-variable **names** holding the actual secret values.
+    Environment-variable **names** holding the actual secret values, OR literal
+    values (the launcher accepts both; ALL_CAPS_WITH_UNDERSCORES is treated as
+    an env-var lookup, anything else as a literal).
 
     Use ``--dry-run`` to render the bootstrap with no Vast.ai calls if you
     don't yet have the env vars set.
@@ -38,6 +40,10 @@ class CredentialsConfig:
     b2_key_id_env: str = "B2_KEY_ID"
     b2_app_key_env: str = "B2_APP_KEY"
     cost_matrix_url_env: str = "COST_MATRIX_URL"
+    # Optional fast mirror for the ImageNet zip. If set, the bootstrap will
+    # curl from this URL instead of going through Kaggle's throttled CDN.
+    # Empty value → fall back to Kaggle.
+    imagenet_zip_url_env: str = ""
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "CredentialsConfig":
@@ -48,6 +54,7 @@ class CredentialsConfig:
             b2_key_id_env=d.get("b2_key_id_env", cls.b2_key_id_env),
             b2_app_key_env=d.get("b2_app_key_env", cls.b2_app_key_env),
             cost_matrix_url_env=d.get("cost_matrix_url_env", cls.cost_matrix_url_env),
+            imagenet_zip_url_env=d.get("imagenet_zip_url_env", cls.imagenet_zip_url_env),
         )
 
 

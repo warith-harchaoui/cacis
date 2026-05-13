@@ -112,19 +112,23 @@ def _resolve_secrets(cfg: VastConfig, *, allow_missing: bool = False) -> Dict[st
     """
     creds = cfg.credentials
     specs = [
-        ("VAST_API_KEY",    creds.vastai_api_key_env,   "vast.ai API key"),
-        ("KAGGLE_USERNAME", creds.kaggle_username_env,  "Kaggle username"),
-        ("KAGGLE_KEY",      creds.kaggle_key_env,       "Kaggle API token"),
-        ("B2_KEY_ID",       creds.b2_key_id_env,        "Backblaze B2 key id"),
-        ("B2_APP_KEY",      creds.b2_app_key_env,       "Backblaze B2 app key"),
-        ("COST_MATRIX_URL", creds.cost_matrix_url_env,  "public URL of cost_matrix.pt"),
+        ("VAST_API_KEY",    creds.vastai_api_key_env,   "vast.ai API key", True),
+        ("KAGGLE_USERNAME", creds.kaggle_username_env,  "Kaggle username", True),
+        ("KAGGLE_KEY",      creds.kaggle_key_env,       "Kaggle API token", True),
+        ("B2_KEY_ID",       creds.b2_key_id_env,        "Backblaze B2 key id", True),
+        ("B2_APP_KEY",      creds.b2_app_key_env,       "Backblaze B2 app key", True),
+        ("COST_MATRIX_URL", creds.cost_matrix_url_env,  "public URL of cost_matrix.pt", True),
+        # Optional — empty spec means "don't ship this env var into the instance".
+        ("IMAGENET_ZIP_URL", creds.imagenet_zip_url_env, "optional ImageNet zip mirror URL", False),
     ]
     resolved: Dict[str, str] = {}
     missing: List[str] = []
-    for canonical, spec, label in specs:
-        val, was_missing = _resolve_one(spec, label=label, allow_missing=allow_missing)
+    for canonical, spec, label, required in specs:
+        if not spec and not required:
+            continue   # optional field left blank in YAML — skip silently
+        val, was_missing = _resolve_one(spec, label=label, allow_missing=allow_missing or not required)
         resolved[canonical] = val
-        if was_missing:
+        if was_missing and required:
             missing.append(f"  - ${spec}  ({label})")
     if missing and allow_missing:
         logger.warning(

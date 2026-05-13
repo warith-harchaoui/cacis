@@ -105,21 +105,58 @@ chmod 600 "$HOME/.config/rclone/rclone.conf"
 # -----------------------------------------------------------------------------
 mkdir -p /data/imagenet && cd /data/imagenet
 if [[ ! -d "ILSVRC/Data/CLS-LOC/train" ]]; then
-    echo "→ Downloading ImageNet from Kaggle (~150 GB) ..."
-    if ! kaggle competitions download -c imagenet-object-localization-challenge; then
-        fatal "kaggle download failed — accept the competition rules at https://www.kaggle.com/competitions/imagenet-object-localization-challenge/rules and verify KAGGLE_USERNAME / KAGGLE_KEY"
+    # Source-of-truth selection:
+    #   IMAGENET_ZIP_URL set → fast curl from a private mirror (deraison.ai etc.)
+    #   else fall back to Kaggle CDN (slow, throttled; left as a courtesy path).
+    if [[ -n "${IMAGENET_ZIP_URL:-}" ]]; then
+        echo "→ Downloading ImageNet from mirror: ${IMAGENET_ZIP_URL}"
+        # -C - resumes if connection drops mid-transfer (mirrors usually finish
+        # in one shot, but cheap insurance on a $0.30/hr clock).
+        if ! curl --fail --location --retry 5 --retry-delay 10 \
+                  --continue-at - --output mirror.zip "${IMAGENET_ZIP_URL}"; then
+            fatal "curl from IMAGENET_ZIP_URL failed — check URL is publicly readable"
+        fi
+        zip_path="mirror.zip"
+    else
+        echo "→ Downloading ImageNet from Kaggle (~150 GB, expect slow + flaky) ..."
+        if ! kaggle competitions download -c imagenet-object-localization-challenge; then
+            fatal "kaggle download failed — accept https://www.kaggle.com/competitions/imagenet-object-localization-challenge/rules and verify KAGGLE_USERNAME / KAGGLE_KEY"
+        fi
+        zip_path="imagenet-object-localization-challenge.zip"
     fi
-    zip_path="imagenet-object-localization-challenge.zip"
+
     if [[ ! -s "$zip_path" ]] || [[ $(stat -c%s "$zip_path" 2>/dev/null || stat -f%z "$zip_path") -lt 100000000 ]]; then
-        fatal "downloaded zip is suspiciously small ($(ls -lh $zip_path 2>/dev/null || echo missing)) — Kaggle returned an error page instead of the dataset"
+        fatal "downloaded zip is suspiciously small ($(ls -lh $zip_path 2>/dev/null || echo missing)) — server returned an error page instead of the dataset"
     fi
     echo "→ Extracting ($(du -h $zip_path | cut -f1)) ..."
     if ! unzip -q "$zip_path"; then
         fatal "unzip failed — disk full, corrupt download, or wrong file"
     fi
     rm -f "$zip_path"
+
+    # The pre-resized mirror extracts into imagenet-resized-256/ILSVRC/...
+    # If that's what we got, move ILSVRC up one level so the rest of the
+    # script (val/ reorg, ImageFolder layout) works without modification.
     if [[ ! -d "ILSVRC/Data/CLS-LOC/train" ]]; then
-        fatal "ILSVRC/Data/CLS-LOC/train still missing after extract"
+        nested=$(find . -maxdepth 4 -type d -name "CLS-LOC" -path "*/ILSVRC/Data/*" | head -1)
+        if [[ -n "$nested" ]]; then
+            parent_of_ilsvrc=$(dirname "$(dirname "$(dirname "$nested")")")
+            if [[ "$parent_of_ilsvrc" != "." && -d "$parent_of_ilsvrc/ILSVRC" ]]; then
+                echo "→ Flattening nested layout: moving $parent_of_ilsvrc/ILSVRC → ."
+                mv "$parent_of_ilsvrc/ILSVRC" .
+                # Carry the small metadata files too if they sit next to ILSVRC.
+                for meta in "LOC_synset_mapping.txt" "LOC_val_solution.csv"; do
+                    if [[ -f "$parent_of_ilsvrc/$meta" ]]; then
+                        mv "$parent_of_ilsvrc/$meta" . || true
+                    fi
+                done
+                rmdir "$parent_of_ilsvrc" 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    if [[ ! -d "ILSVRC/Data/CLS-LOC/train" ]]; then
+        fatal "ILSVRC/Data/CLS-LOC/train still missing after extract — wrong zip layout?"
     fi
     echo "  ✓ ImageNet present at /data/imagenet/ILSVRC"
 else
